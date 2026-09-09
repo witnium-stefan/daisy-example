@@ -64,6 +64,23 @@ jobs:
             --target "$SOURCE_REVISION" --title "Images for $SOURCE_REVISION" \
             --notes 'Reviewed source revision and digest-only Compose artifact. Visibility verified anonymously; this is not deployment or recovery proof.' \
             release/docker-compose.yaml release/images.json release/visibility.json
+      - name: Commit verified Compose to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git fetch origin main
+          checkout="$RUNNER_TEMP/pinned-compose"
+          git worktree add --detach "$checkout" FETCH_HEAD
+          cp release/docker-compose.yaml "$checkout/docker-compose.yaml"
+          git -C "$checkout" add -- docker-compose.yaml
+          if git -C "$checkout" diff --cached --quiet; then
+            echo 'Verified Compose is unchanged; skipping commit.'
+            exit 0
+          fi
+          digests=$(node --input-type=module -e 'import { readFileSync } from "node:fs"; import { validateCompose, services } from "./scripts/compose.mjs"; const digests = validateCompose(readFileSync("release/docker-compose.yaml", "utf8")); console.log(services.map(name => `${name}=${digests[name].slice(7, 19)}`).join(" "));')
+          git -C "$checkout" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "publish: pin images $digests"
+          git -C "$checkout" push origin HEAD:refs/heads/main
       - name: Remove publisher credentials
         if: always()
         env:

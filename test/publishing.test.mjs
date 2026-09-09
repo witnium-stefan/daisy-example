@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, readdir, mkdir, copyFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compose, generate, services, validateCompose } from '../scripts/compose.mjs';
@@ -8,6 +9,81 @@ import { verifyVisibility } from '../scripts/verify-visibility.mjs';
 
 // Synthetic digests are confined to tests; deployment output uses build metadata.
 const digests = Object.fromEntries(services.map((name, i) => [name, `sha256:${String(i + 1).repeat(64)}`]));
+
+async function composeCommitStep() {
+  const workflow = await readFile(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8');
+  const steps = workflow.split(/^      - /m);
+  const verify = steps.findIndex(step => step.startsWith('name: Generate and verify deployment artifact\n'));
+  const release = steps.findIndex(step => step.startsWith('name: Publish immutable release assets\n'));
+  const commit = steps.findIndex(step => step.startsWith('name: Commit verified Compose to main\n'));
+  assert.ok(verify > 0 && release > verify && commit > release);
+  assert.match(steps[verify], /node scripts\/verify-visibility\.mjs release\/images.json/);
+  assert.match(steps[release], /gh release create/);
+  assert.match(steps[release], /release\/docker-compose.yaml/);
+  for (const index of [verify, release, commit]) {
+    assert.doesNotMatch(steps[index], /\bif:|continue-on-error:|\|\|\s*true/);
+  }
+  assert.equal(workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1], '  workflow_dispatch:\n');
+  assert.match(workflow, /permissions:\n      contents: write/);
+  assert.match(steps[commit], /GH_TOKEN: \$\{\{ github.token \}\}/);
+  return steps[commit].split('        run: |\n')[1].trimEnd().split('\n').map(line => line.slice(10)).join('\n');
+}
+
+test('workflow commits only after successful visibility verification and release publication', async () => {
+  await composeCommitStep();
+});
+
+test('workflow checks in exact generator output on current main and skips unchanged content', async (t) => {
+  const script = await composeCommitStep();
+  const directory = await mkdtemp(join(tmpdir(), 'daisy-publish-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const remote = join(directory, 'remote.git');
+  const source = join(directory, 'source');
+  const bin = join(directory, 'bin');
+  await mkdir(source);
+  await mkdir(bin);
+  // Only authentication is stubbed; every Git operation uses a local repository.
+  await writeFile(join(bin, 'gh'), '#!/bin/sh\n[ "$*" = "auth setup-git" ]\n', { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' };
+  const git = (...args) => execFileSync('git', args, { cwd: source, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('init', '--bare', '--initial-branch=main', remote);
+  git('init', '--initial-branch=main');
+  git('remote', 'add', 'origin', remote);
+  await writeFile(join(source, 'README.md'), 'Reviewed source\n');
+  git('add', 'README.md');
+  git('commit', '-m', 'Reviewed source');
+  const revision = git('rev-parse', 'HEAD');
+  await writeFile(join(source, 'README.md'), 'Newer main content\n');
+  git('commit', '-am', 'Advance main');
+  const currentMain = git('rev-parse', 'HEAD');
+  git('push', 'origin', 'main');
+  git('checkout', '--detach', revision);
+  await mkdir(join(source, 'scripts'));
+  await copyFile(new URL('../scripts/compose.mjs', import.meta.url), join(source, 'scripts/compose.mjs'));
+  const release = join(source, 'release');
+  await mkdir(release);
+  for (const name of services) await writeFile(join(release, `${name}.json`), JSON.stringify({ 'containerimage.digest': digests[name] }));
+  await generate(release, revision);
+  const artifact = await readFile(join(release, 'docker-compose.yaml'), 'utf8');
+  const run = async (number) => {
+    const runnerTemp = join(directory, `runner-${number}`);
+    await mkdir(runnerTemp);
+    return execFileSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script], { cwd: source, env: { ...env, RUNNER_TEMP: runnerTemp }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  };
+  await run(1);
+  const committed = git('--git-dir', remote, 'show', 'main:docker-compose.yaml') + '\n';
+  assert.equal(committed, artifact);
+  assert.equal(compose(validateCompose(committed)), committed, 'Checked-in file equals the generator shape');
+  assert.equal(git('--git-dir', remote, 'show', 'main:README.md'), 'Newer main content');
+  assert.equal(git('--git-dir', remote, 'rev-parse', 'main^'), currentMain);
+  assert.equal(git('--git-dir', remote, 'log', '-1', '--format=%s', 'main'), `publish: pin images ${services.map(name => `${name}=${digests[name].slice(7, 19)}`).join(' ')}`);
+  const pinned = git('--git-dir', remote, 'rev-parse', 'main');
+  assert.match(await run(2), /unchanged; skipping commit/);
+  assert.equal(git('--git-dir', remote, 'rev-parse', 'main'), pinned);
+  await rm(join(release, 'docker-compose.yaml'));
+  await assert.rejects(run(3), /docker-compose.yaml/);
+  assert.equal(git('--git-dir', remote, 'rev-parse', 'main'), pinned);
+});
 
 test('publish workflow only references runner context within job steps', async () => {
   const workflow = await readFile(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8');

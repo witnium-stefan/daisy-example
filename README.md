@@ -266,8 +266,9 @@ Publication authority into the personal `witnium` GHCR namespace is recorded in
 The workflow fails by name if the secret is missing. It passes the secret only
 to Docker login over stdin, uses an isolated temporary Docker credential directory,
 and logs out and removes that directory afterward. No credential is a build argument
-or release asset. The repository's `GITHUB_TOKEN` needs `contents: write` only to
-create the release. No registry password is reused for GitHub release creation.
+or release asset. The repository's `GITHUB_TOKEN` uses the workflow's
+`contents: write` permission to create the release and commit Compose to `main`.
+No registry password is reused for GitHub operations.
 
 1. Review the commit, then dispatch **Publish reviewed images** on that revision.
    CI checks out the exact dispatch SHA, installs the lockfile and runs `npm test`.
@@ -285,21 +286,28 @@ create the release. No registry password is reused for GitHub release creation.
 4. Only after those checks succeed, CI creates release `images-<full-source-SHA>`
    with `docker-compose.yaml`, `images.json` (source-to-digest mapping), and
    `visibility.json` (observed anonymous statuses). Existing release assets are
-   not overwritten. No fabricated deployment digest or executable placeholder
-   Compose file is checked into this source repository.
+   not overwritten.
+5. After successful release creation, CI commits the exact generated artifact bytes
+   to `docker-compose.yaml` at the repository root on `main`. The commit convention
+   is `publish: pin images web=<12 hex digits> api=<12 hex digits> worker=<12 hex digits> postgres=<12 hex digits>`.
+   Unchanged content skips the commit. The workflow remains `workflow_dispatch`
+   only, so this commit does not trigger another publish. The update starts from
+   the current `main`; a concurrent update or denied push fails without force-pushing.
 
-The chosen artifact transport is a **release asset**, not an automatic source
-commit. Download `docker-compose.yaml` from the reviewed release and collect with
+The checked-in `docker-compose.yaml` is the artifact for **repository-source intake**:
+use `composePath: "docker-compose.yaml"` and pin the exact `publish: pin images`
+commit. The file becomes available after a successful publish; no placeholder
+digests are checked in beforehand. The **release asset** remains available too.
+Download `docker-compose.yaml` from the reviewed release and collect with
 `source: {kind: "compose-file", path: <absolute downloaded path>, name: "daisy-example"}`.
 The file is generated from all four Buildx result digests and validated against
 the exact specification shape. The generator fails on missing metadata; it does
 not guess image tags or add unsupported fields. It can be run explicitly as
 `SOURCE_REVISION=<full-SHA> npm run compose:generate -- <metadata-directory>`.
 
-The same bytes are valid for repository collection if explicitly committed in a
-separate reviewed digest update, with `composePath: "docker-compose.yaml"` and its
-exact commit. This workflow does not make that update. A local-file collection has
-null repository revision; retain `images.json` with the artifact as separate source
+The image source revision is the reviewed dispatch SHA, while repository intake
+pins the subsequent Compose commit. A local-file collection has null repository
+revision; retain `images.json` with the artifact as separate source
 evidence. Select `applicationName: "daisy-example"`, `primaryService: "web"`,
 `primaryPort: "8080"`, and explicitly approved hostname/exposure configuration.
 

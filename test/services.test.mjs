@@ -7,16 +7,16 @@ import { applicationHandler, configuration, httpReady } from '../services/common
 
 const env = {
   SOURCE_REVISION: 'a'.repeat(40), EXAMPLE_MESSAGE: 'Daisy example',
-  DATABASE_URL: 'postgresql://fixture:unit-only@postgres/example', EXAMPLE_SHARED_SECRET: 'unit-only-marker',
+  DATABASE_URL: 'postgresql://fixture:unit-only@postgres/example', EXAMPLE_TOKEN: 'unit-only-marker', API_URL: 'http://api:9090', FILES_PATH: '/data',
 };
 const factories = { web: createWeb, api: createApi, worker: createWorker };
-const dependencyNames = { web: ['api'], api: ['postgres'], worker: ['api', 'postgres', 'files'] };
+const dependencyNames = { web: ['api'], api: ['postgres', 'files'], worker: ['api', 'postgres'] };
 
 async function invoke(handler, url, method = 'GET') {
   let status, headers, body;
   await handler({ method, url }, {
     writeHead(code, values) { status = code; headers = values; },
-    end(value) { body = JSON.parse(value); },
+    end(value) { body = headers['content-type'].startsWith('text/html') ? value : JSON.parse(value); },
   });
   return { status, headers, body };
 }
@@ -37,31 +37,36 @@ for (const [name, create] of Object.entries(factories)) {
   });
   for (const dependency of dependencyNames[name]) {
     test(`${name}: ${dependency} outage fails readiness but keeps liveness, without leaking credentials`, async () => {
-      const handler = create(env, { ...dependencies, [dependency]: async () => { throw new Error(env.DATABASE_URL + env.EXAMPLE_SHARED_SECRET); } });
+      const handler = create(env, { ...dependencies, [dependency]: async () => { throw new Error(env.DATABASE_URL + env.EXAMPLE_TOKEN); } });
       const ready = await invoke(handler, '/health/ready');
       assert.equal(ready.status, 503);
       assert.equal(ready.body.dependencies[dependency], 'unavailable');
       assert.equal((await invoke(handler, '/health/live')).status, 200);
-      assert.equal(JSON.stringify(ready).includes(env.EXAMPLE_SHARED_SECRET), false);
+      assert.equal(JSON.stringify(ready).includes(env.EXAMPLE_TOKEN), false);
       assert.equal(JSON.stringify(ready).includes(env.DATABASE_URL), false);
     });
   }
   test(`${name}: missing readiness probe is a configuration error`, () => {
     assert.throws(() => create(env, {}), /Missing required readiness probe/);
   });
-  for (const key of ['SOURCE_REVISION', ...(name === 'web' ? ['EXAMPLE_MESSAGE'] : ['DATABASE_URL', 'EXAMPLE_SHARED_SECRET'])]) {
+  for (const key of ['SOURCE_REVISION', ...(name === 'web' ? ['EXAMPLE_MESSAGE', 'API_URL'] : name === 'api' ? ['DATABASE_URL', 'EXAMPLE_TOKEN', 'FILES_PATH'] : ['DATABASE_URL', 'EXAMPLE_TOKEN', 'API_URL'])]) {
     test(`${name}: missing ${key} fails specifically`, () => {
       for (const value of [undefined, '', '   ']) assert.throws(() => create({ ...env, [key]: value }, dependencies), new RegExp(`Missing required configuration: ${key}`));
     });
   }
 }
 
-test('web returns the approved nonsecret message binding', async () => {
+test('web renders the approved nonsecret message and API answer', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ service: 'api', rows: [{ id: 'visible-job' }] })));
   const handler = createWeb(env, { api: async () => {} });
-  assert.deepEqual((await invoke(handler, '/')).body, { service: 'web', message: env.EXAMPLE_MESSAGE });
+  assert.match((await invoke(handler, '/')).body, /Daisy example/);
+  assert.match((await invoke(handler, '/')).body, /visible-job/);
+  const changed = createWeb({ ...env, EXAMPLE_MESSAGE: 'Changed binding' }, { api: async () => {} });
+  assert.match((await invoke(changed, '/')).body, /Changed binding/);
 });
 
-test('application ingress cannot expose management endpoints', async () => {
+test('application ingress cannot expose management endpoints', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ service: 'api', rows: [] })));
   const handler = applicationHandler(createWeb(env, { api: async () => {} }));
   for (const path of ['/health/live', '/health/ready', '/version', '/version?x=1']) {
     assert.equal((await invoke(handler, path)).status, 404);
@@ -70,7 +75,7 @@ test('application ingress cannot expose management endpoints', async () => {
 });
 
 test('invalid configuration fails without exposing its value', () => {
-  assert.throws(() => configuration('api', { ...env, DATABASE_URL: env.EXAMPLE_SHARED_SECRET }), { message: 'Invalid DATABASE_URL' });
+  assert.throws(() => configuration('api', { ...env, DATABASE_URL: env.EXAMPLE_TOKEN }), { message: 'Invalid DATABASE_URL' });
   assert.throws(() => configuration('api', { ...env, DATABASE_URL: 'https://postgres/example' }), /Invalid DATABASE_URL/);
   assert.throws(() => configuration('web', { ...env, SOURCE_REVISION: 'main' }), /Invalid SOURCE_REVISION/);
 });

@@ -2,8 +2,9 @@
 
 Synthetic application for Opsie Daisy's operational acceptance examples. The
 reviewed specification is `docs/architecture/example-application.md` in
-`witnium-stefan/opsie-daisy-repo`. This repository implements slice 1, Repository
-and CI. It does not claim a live deployment or successful restore.
+`witnium-stefan/opsie-daisy-repo`. This repository implements slices 1 and 2: Repository and CI, and Services and
+state. Local fixture tests are not evidence of a live deployment, database-server
+restart, backup system, or off-site recovery.
 
 ## Local development
 
@@ -14,46 +15,134 @@ fnm exec --using 24 -- npm ci --ignore-scripts
 fnm exec --using 24 -- npm test
 ```
 
-Tests use Node's standard test runner, fake registry responses and an in-memory
-transaction store. They need neither Docker nor credentials and never push images.
-They cover all three services' health/version handlers, configuration failures,
-dependency failures, ledger ordering, hash chains, idempotency and rollback, and
-the exact generated Compose grammar. Heavy integration, e2e, demo, rehearsal and
-full CI gates are **DEFERRED** to the runbook after the build, not reported as passing.
+Tests use Node's standard test runner, fake registry responses, temporary files,
+loopback HTTP listeners, and an in-memory transaction stand-in. Docker is not
+required. If `DATABASE_URL` is present, the same command also runs PostgreSQL
+commit, independent-session readback, rollback, concurrent retry, and application
+process restart tests. Supply it through the environment to an **empty disposable
+PostgreSQL database**; there is no default URL. An empty or invalid supplied value
+fails. These tests retain their rows and refuse an already populated fixture;
+they never erase an existing database. Without the binding, the PostgreSQL test
+explicitly reports skipped/unavailable, not passed. Server restart and live
+storage evidence remain for the runbook.
 
-The only runtime dependency is `pg@8.16.3`, published June 27, 2025. The lockfile
-was resolved with `--before=2026-08-26`, enforcing the 14-day release quarantine
-as of September 9, 2026 for transitive dependencies too. Dependency updates must
-repeat that age check. Web uses only the standard library. Node 24.7.0 and
-PostgreSQL 17.6 bookworm base images are pinned to verified upstream OCI digests
-in their Dockerfiles. Builds use the repository root as context.
+Heavy integration, e2e, demo, rehearsal, and full CI gates are **DEFERRED** to the
+runbook after the build, not reported as passing.
 
-Run a service with `node services/web/main.mjs`, `node services/api/main.mjs`, or
-`node services/worker/main.mjs` after supplying its required environment through
-an approved binding. `SOURCE_REVISION` must be a full 40-character Git SHA; CI
-bakes it into each Node image. Web also requires `EXAMPLE_MESSAGE`; API and
-worker require `DATABASE_URL` (including the database name) and
-`EXAMPLE_SHARED_SECRET`. Missing or malformed configuration fails startup with
-the key's name, without printing its value. The shared credential's request
-authentication belongs to slice 2; there are no private work submission routes yet.
-Never put credentials in source, command arguments, test output, or checked-in files.
+The only runtime dependency is the existing `pg@8.16.3`. The lockfile was resolved
+with `--before=2026-08-26`, enforcing the 14-day release quarantine as of September
+9, 2026 for transitive dependencies too. Dependency updates must repeat that age
+check. Web uses only the standard library. Node 24.7.0 and PostgreSQL 17.6 bookworm
+base images are pinned to upstream OCI digests in their Dockerfiles. Builds use
+the repository root as context.
 
-Application ports are web 8080, API 8081 and worker 8082. Each process also has an
-internal management listener on port 9090, excluded from Compose's advertised
-ports and public application routing. Keep that listener on the private service
-network; do not publish it or route a public hostname to it. When running several
-processes locally, use separate network namespaces or run one at a time.
+Run `node services/web/main.mjs`, `node services/api/main.mjs`, or
+`node services/worker/main.mjs` after supplying approved bindings:
 
-| Aspect | Slice 1 evidence and boundary |
+| Service | Required configuration |
 | --- | --- |
-| Health and version | Private `:9090/health/live`, `/health/ready`, `/version` on every Node service. Version reports service, application version and source revision; release evidence supplies image digests. Application ingress returns 404 for management paths. |
-| Dependencies | Web readiness checks API identity/readiness; API queries PostgreSQL with `SELECT 1`; worker checks API, PostgreSQL and read/write access to `/data`. Failure returns 503 while liveness remains 200. Readiness does not prove useful work. |
-| Configuration | Web `/` returns the bound nonsecret `EXAMPLE_MESSAGE`. Compose carries key names only, including PostgreSQL's required `POSTGRES_PASSWORD`. |
-| Web → API → worker and real writes | Ordered worker ledger core is tested against an in-memory transaction stand-in. Live queue/SQL commit acknowledgment and second-session readback are slice 2. No volatile store is used by a running service. |
-| State and files | Ledger test fixtures assert contiguous committed sequences, idempotent job IDs, payload hashes and previous-row hashes. Failed commits leave no gap. Payloads are bounded to 1 KiB and the ledger to 10,000 entries. Separate `database` and `files` named volumes preserve the planned mount contract. Durable files, storage usage bounds and barriers are slice 2; nothing prunes or migrates state. |
-| Public/private packages | CI requires anonymous manifest 200 for web, API and PostgreSQL; worker must deny anonymous reads with 401/403. Publishing uses scoped repository-secret authority. |
-| Hostnames and TLS | Later live work must record allocated hostname/zone/account, installed target and reviewed certificate-fixture mechanism, then distinguish origin identity from DNS/edge and independent external reachability. |
-| Failures, restore and upgrade | No failure switches or campaign exist in this slice. Future faults require private scoped authorization and independent reset. Restore requires the complete common watermark prefix plus matching durable files; readiness and maximum sequence alone are insufficient. Version upgrades must retain committed data and binding custody. |
+| All Node services | `SOURCE_REVISION`: full 40-character Git SHA, baked into published images. |
+| Web | `EXAMPLE_MESSAGE`: visible nonsecret message; `API_URL`: internal API HTTP origin. |
+| API | `DATABASE_URL`: PostgreSQL URL including database name; `EXAMPLE_TOKEN`: worker credential; `FILES_PATH`: absolute existing writable mounted directory. |
+| Worker | `DATABASE_URL`, the same `EXAMPLE_TOKEN`, and `API_URL`. |
+| PostgreSQL | `POSTGRES_PASSWORD` through its approved binding. |
+
+For the Compose topology, explicitly bind `API_URL` to `http://api:9090` and
+`FILES_PATH` to `/data`. These are deployment bindings, never runtime defaults.
+The existing `files` named volume is also mounted on the API, which performs the
+file writes requested by the worker. The worker mount and `database` volume are
+preserved; no data is moved or erased.
+`EXAMPLE_TOKEN` is the slice 2 credential key, replacing the unused slice 1
+`EXAMPLE_SHARED_SECRET` intent. Credentials accept visible ASCII for HTTP header
+transport. Missing configuration refuses startup by key; invalid URLs and
+unavailable database/files storage fail without printing binding values. Never
+put credentials in source, command arguments, logs, or checked-in files.
+
+Application ports are web 8080, API 8081, and worker 8082. Each process also has an
+internal management listener on 9090, excluded from Compose's advertised ports.
+Keep 9090 on the private service network; do not publish it or route a public
+hostname to it. Run local processes in separate network namespaces or one at a
+time because they share that management port.
+
+## Service flow and evidence
+
+Web `/` renders the API ledger and the bound `EXAMPLE_MESSAGE`, and provides a
+job submission form. Changing the message binding changes the rendered response.
+The form posts `{ "id": "example-job", "payload": "example bytes" }` to web
+`POST /jobs`, which forwards to API `POST /jobs`. API acknowledgment (202) means
+**queued durably**, not completed. `GET /ledger` returns ordered committed rows;
+`GET /files` returns durable file names, byte counts, and SHA-256 hashes. Web also
+proxies these read routes. Payloads are rendered as text, not interpreted HTML.
+
+The worker consumes the durable FIFO through authenticated API requests. When
+idle, it puts a synthetic job into the same queue. It appends at most one ledger
+entry per second, allocating the next sequence under a PostgreSQL transaction
+lock from the last committed row. `synchronous_commit=on` and a completed `COMMIT`
+precede acknowledgment. Job IDs are idempotent; a conflicting payload fails with
+409. Rollback leaves no sequence gap. The existing limits are 1 KiB per payload
+and 10,000 ledger entries; writes stop loudly on failure rather than prune history.
+Actual host storage/WAL accounting and the campaign's 64 MiB execution envelope
+still require live measurement; these local tests do not prove a disk quota.
+
+After committing, the worker asks API to complete a one-entry batch. API reads
+the committed row, writes deterministic JSON bytes to a reserved temporary file,
+fsyncs, atomically renames to `00001.json` (and so on), fsyncs the directory, and
+records the file hash in another acknowledged transaction. A restart/retry
+reconciles the file from the committed row, including interrupted temporary writes
+or renames. Existing files with different bytes fail and remain untouched. The
+worker stops on a flow failure and reports unavailable readiness; restart it after
+the dependency is repaired to retry the pending job. No running service uses the
+in-memory stand-in, and no initialization deletes or migrates existing state.
+
+All `/internal/*` API routes require `Authorization: Bearer <EXAMPLE_TOKEN>` on
+9090. Invalid credentials receive 401 without being echoed. Public application
+listeners exclude every internal and management route. API rejects secret-bearing
+job content before storage. Tests use a generated canary credential and check
+authentication failures, dependency errors, responses, and file bytes for leakage.
+No request headers, raw SQL errors, or binding values are logged.
+
+Private `GET /health/live`, `/health/ready`, and `/version` exist on every Node
+service. Version reports service, application version, and source revision; release
+evidence binds the image digest. API readiness probes the PostgreSQL schema and
+configured files directory; worker probes PostgreSQL plus API readiness and
+credential acceptance; web probes API readiness and identity. A failed dependency
+returns 503 while liveness remains 200. Readiness alone does not prove useful work.
+
+## Complete-prefix restore oracle
+
+On the private API listener, authenticated `POST /internal/checkpoint` takes
+`{ "runId": "run-1", "imageDigest": "sha256:<64 hex digits>", "targetScope": "source-copy" }`.
+Supply the actual observed digest and target scope, not that explanatory
+placeholder. The endpoint holds the same transaction lock as the ordered writer,
+drains all committed rows' file completions, verifies the full row/hash chain and
+file set, and returns a manifest only after commit. It includes checkpoint ID,
+run ID, time, source revision, supplied image identity/scope, common watermark W,
+every ordered row, and every file's name/hash/size. Writers resume when the lock
+is released. New submissions can wait for the barrier; queue state is not the
+committed-prefix oracle.
+
+Retain that response **outside** the protected database and files volume as the
+independent expected manifest. Commit additional jobs after the checkpoint to
+make the selected boundary observable. Using an independently approved protection
+mechanism, restore both database and files to an isolated destination with no
+worker and no public hostname. This slice does not copy a live database or choose
+a backup mechanism. Send the retained manifest to authenticated
+`POST /internal/restore` on the restored API's private listener.
+
+A 200 response with `status: "complete-prefix"` means exactly rows 1..W match the
+independent ordered payload/hash chain and every expected file's bytes/hash, with
+no extra rows or files. It reports checkpoint ID, selected and observed watermarks,
+and verification duration in milliseconds. A missing middle row, altered payload,
+wrong/missing file, unexpected file, or post-barrier row returns 409. Verification
+is read-only; it does not repair the restored copy or discard failed evidence.
+Verification duration is not restore duration or an RTO promise. Actual restore
+start/end times and capability-specific RPO/RTO evidence belong to the later
+campaign. Local persistence alone proves neither consistent backup nor off-site
+protection.
+
+No failure switches, fault campaign, TLS adapter, or deployment capability changes
+are included. Authorized fault control, live storage bounds, upgrade/binding
+custody, and actual recovery remain later slices.
 
 ## Publish a reviewed revision
 

@@ -6,6 +6,8 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY services/database.mjs services/database.mjs
 COPY services/common.mjs services/common.mjs
 COPY services/api/ services/api/
+COPY services/worker/ledger.mjs services/worker/ledger.mjs
+RUN mkdir /data && chown node:node /data
 ARG SOURCE_REVISION
 RUN test -n "$SOURCE_REVISION"
 ENV SOURCE_REVISION=$SOURCE_REVISION

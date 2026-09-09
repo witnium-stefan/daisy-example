@@ -1,4 +1,6 @@
 import { createServer } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
+import { isAbsolute } from 'node:path';
 
 export function required(env, key) {
   if (typeof env[key] !== 'string' || env[key].trim() === '') {
@@ -14,18 +16,29 @@ export function configuration(service, env) {
   if (service === 'web') config.message = required(env, 'EXAMPLE_MESSAGE');
   else {
     config.databaseUrl = required(env, 'DATABASE_URL');
-    config.sharedSecret = required(env, 'EXAMPLE_SHARED_SECRET');
+    config.token = required(env, 'EXAMPLE_TOKEN');
+    if (!/^[\x21-\x7e]+$/.test(config.token)) throw new Error('Invalid EXAMPLE_TOKEN: expected visible ASCII');
     let url;
     try { url = new URL(config.databaseUrl); } catch { throw new Error('Invalid DATABASE_URL'); }
     if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || !url.pathname.slice(1)) {
       throw new Error('Invalid DATABASE_URL: expected a PostgreSQL URL with host and database');
     }
   }
+  if (service === 'web' || service === 'worker') {
+    config.apiUrl = required(env, 'API_URL');
+    let url;
+    try { url = new URL(config.apiUrl); } catch { throw new Error('Invalid API_URL'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Invalid API_URL: expected an HTTP origin without credentials');
+  }
+  if (service === 'api') {
+    config.filesPath = required(env, 'FILES_PATH');
+    if (!isAbsolute(config.filesPath)) throw new Error('Invalid FILES_PATH: expected an absolute mounted directory');
+  }
   return config;
 }
 
 export function handler(service, config, dependencies) {
-  const requiredDependencies = { web: ['api'], api: ['postgres'], worker: ['api', 'postgres', 'files'] }[service];
+  const requiredDependencies = { web: ['api'], api: ['postgres', 'files'], worker: ['api', 'postgres'] }[service];
   for (const name of requiredDependencies) {
     if (typeof dependencies?.[name] !== 'function') throw new Error(`Missing required readiness probe: ${service}/${name}`);
   }
@@ -44,7 +57,6 @@ export function handler(service, config, dependencies) {
       const ready = results.every(([, status]) => status === 'ready');
       return send(ready ? 200 : 503, { service, status: ready ? 'ready' : 'unavailable', dependencies: Object.fromEntries(results) });
     }
-    if (service === 'web' && req.url === '/') return send(200, { service, message: config.message });
     return send(404, { error: 'not-found' });
   };
 }
@@ -82,11 +94,52 @@ export function listen(service, port, requestHandler, close = async () => {}) {
 
 export function applicationHandler(requestHandler) {
   return (req, res) => {
-    if (req.url !== '/') {
+    if (!['/', '/jobs', '/ledger', '/files'].includes(req.url)) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'not-found' }));
       return;
     }
     return requestHandler(req, res);
   };
+}
+
+export function containsSecret(value, token) {
+  if (typeof value === 'string') return value.includes(token);
+  if (value && typeof value === 'object') return Object.entries(value).some(([key, entry]) => key.includes(token) || containsSecret(entry, token));
+  return false;
+}
+
+export function send(res, status, body, token) {
+  let encoded = JSON.stringify(body);
+  if (token && containsSecret(body, token)) { status = 500; encoded = JSON.stringify({ error: 'Secret-bearing content refused' }); }
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(encoded);
+}
+
+export function authorized(req, token) {
+  const actual = Buffer.from(req.headers?.authorization ?? '');
+  const expected = Buffer.from(`Bearer ${token}`);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+export async function body(req, token, limit = 8192) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of req) {
+    length += chunk.length;
+    if (length > limit) throw new Error('Request body too large');
+    chunks.push(chunk);
+  }
+  const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (token && containsSecret(value, token)) throw new Error('Secret-bearing content refused');
+  return value;
+}
+
+export async function apiRequest(config, path, options = {}) {
+  const response = await fetch(new URL(path, config.apiUrl), {
+    ...options, headers: { 'content-type': 'application/json', ...(config.token ? { authorization: `Bearer ${config.token}` } : {}) },
+    signal: AbortSignal.timeout(10000), redirect: 'error',
+  });
+  if (!response.ok) throw new Error('API request failed');
+  return response.json();
 }

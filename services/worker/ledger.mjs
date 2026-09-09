@@ -2,11 +2,14 @@ import { createHash } from 'node:crypto';
 
 export const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
-// The store must serialize transactions and resolve only after commit. This slice
-// exercises the writer contract with an in-memory store, not a durable adapter.
-export async function writeLedger(store, { id, payload }) {
+// The store serializes transactions and resolves only after acknowledged commit.
+export function validateJob({ id, payload }) {
   if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Invalid job ID');
   if (typeof payload !== 'string' || Buffer.byteLength(payload) > 1024) throw new Error('Payload must be a string of at most 1024 bytes');
+}
+
+export async function writeLedger(store, { id, payload }) {
+  validateJob({ id, payload });
   const payloadHash = hash(payload);
   return store.transaction(async (tx) => {
     const existing = await tx.findJob(id);

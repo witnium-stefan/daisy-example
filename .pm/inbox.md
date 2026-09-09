@@ -1,0 +1,2 @@
+- 2026-09-09T17:08:06Z · 0001 · this level needs a live probe: add a line to ## Acceptance starting with 'probe:' that runs against the running world, then run the item again
+- 2026-09-09T17:10:07Z · 0001 · failed: no commit (exit=0) — see /Users/stefan/Projects/Witnium/daisy-example/wt/.runner/rb-0001/build-call.final

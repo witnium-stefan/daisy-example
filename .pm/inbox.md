@@ -6,3 +6,4 @@
 - 2026-09-09T17:24:12Z · 0002 · look at this: - A1. The check succeeds: fnm exec --using 24 -- npm test
 - 2026-09-09T17:36:18Z · 0003 · growth over budget: GROWTH=652 (55% of 1166 tracked lines) — services and state: web, api and worker flow with real PostgreSQL commits, files on a volume, configuration and secret consumption, health and version endpoints, and the ledger oracle
 - 2026-09-09T17:36:23Z · 0003 · look at this: fnm exec --using 24 -- npm test 2>&1 | tail -5
+- 2026-09-09T17:51:55Z · 0004 · growth over budget: GROWTH=656 (38% of 1704 tracked lines) — failure switches: per-service crash and latency controls plus isolated disk, database and certificate faults, private, bounded, and resettable

@@ -19,19 +19,23 @@ services:
     image: ghcr.io/witnium/daisy-example-web@${digests.web}
     ports: ["8080"]
     depends_on: [api]
-    environment: [EXAMPLE_MESSAGE, API_URL]
+    environment: [EXAMPLE_MESSAGE, API_URL, EXAMPLE_TOKEN, FILES_PATH]
+    volumes: ["files:/data"]
+    restart: unless-stopped
   api:
     image: ghcr.io/witnium/daisy-example-api@${digests.api}
     ports: ["8081"]
     depends_on: [postgres]
-    environment: [DATABASE_URL, EXAMPLE_TOKEN, FILES_PATH]
+    environment: [DATABASE_URL, EXAMPLE_TOKEN, FILES_PATH, FAULT_FILL_CAP_BYTES, FAULT_FILL_FLOOR_BYTES]
     volumes: ["files:/data"]
+    restart: unless-stopped
   worker:
     image: ghcr.io/witnium/daisy-example-worker@${digests.worker}
     ports: ["8082"]
     depends_on: [api, postgres]
-    environment: [DATABASE_URL, EXAMPLE_TOKEN, API_URL]
+    environment: [DATABASE_URL, EXAMPLE_TOKEN, API_URL, FILES_PATH]
     volumes: ["files:/data"]
+    restart: unless-stopped
   postgres:
     image: ghcr.io/witnium/daisy-example-postgres@${digests.postgres}
     ports: ["5432"]

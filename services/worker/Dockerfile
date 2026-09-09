@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY services/database.mjs services/database.mjs
 COPY services/common.mjs services/common.mjs
+COPY services/faults.mjs services/faults.mjs
 COPY services/worker/ services/worker/
 ARG SOURCE_REVISION
 RUN test -n "$SOURCE_REVISION"

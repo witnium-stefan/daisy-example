@@ -6,7 +6,7 @@ import { createWorker } from '../services/worker/main.mjs';
 import { applicationHandler, configuration, httpReady } from '../services/common.mjs';
 
 const env = {
-  SOURCE_REVISION: 'a'.repeat(40), EXAMPLE_MESSAGE: 'Daisy example',
+  SOURCE_REVISION: 'a'.repeat(40), FAULT_FILL_CAP_BYTES: '1048576', FAULT_FILL_FLOOR_BYTES: '1048576', EXAMPLE_MESSAGE: 'Daisy example',
   DATABASE_URL: 'postgresql://fixture:unit-only@postgres/example', EXAMPLE_TOKEN: 'unit-only-marker', API_URL: 'http://api:9090', FILES_PATH: '/data',
 };
 const factories = { web: createWeb, api: createApi, worker: createWorker };
@@ -49,7 +49,7 @@ for (const [name, create] of Object.entries(factories)) {
   test(`${name}: missing readiness probe is a configuration error`, () => {
     assert.throws(() => create(env, {}), /Missing required readiness probe/);
   });
-  for (const key of ['SOURCE_REVISION', ...(name === 'web' ? ['EXAMPLE_MESSAGE', 'API_URL'] : name === 'api' ? ['DATABASE_URL', 'EXAMPLE_TOKEN', 'FILES_PATH'] : ['DATABASE_URL', 'EXAMPLE_TOKEN', 'API_URL'])]) {
+  for (const key of ['SOURCE_REVISION', 'EXAMPLE_TOKEN', 'FILES_PATH', ...(name === 'web' ? ['EXAMPLE_MESSAGE', 'API_URL'] : name === 'api' ? ['DATABASE_URL', 'FAULT_FILL_CAP_BYTES', 'FAULT_FILL_FLOOR_BYTES'] : ['DATABASE_URL', 'API_URL'])]) {
     test(`${name}: missing ${key} fails specifically`, () => {
       for (const value of [undefined, '', '   ']) assert.throws(() => create({ ...env, [key]: value }, dependencies), new RegExp(`Missing required configuration: ${key}`));
     });

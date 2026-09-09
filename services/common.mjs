@@ -12,12 +12,12 @@ export function required(env, key) {
 export function configuration(service, env) {
   const revision = required(env, 'SOURCE_REVISION');
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error('Invalid SOURCE_REVISION: expected a full Git SHA');
-  const config = { revision };
+  const config = { revision, token: required(env, 'EXAMPLE_TOKEN'), filesPath: required(env, 'FILES_PATH') };
+  if (!/^[\x21-\x7e]+$/.test(config.token)) throw new Error('Invalid EXAMPLE_TOKEN: expected visible ASCII');
+  if (!isAbsolute(config.filesPath)) throw new Error('Invalid FILES_PATH: expected an absolute mounted directory');
   if (service === 'web') config.message = required(env, 'EXAMPLE_MESSAGE');
   else {
     config.databaseUrl = required(env, 'DATABASE_URL');
-    config.token = required(env, 'EXAMPLE_TOKEN');
-    if (!/^[\x21-\x7e]+$/.test(config.token)) throw new Error('Invalid EXAMPLE_TOKEN: expected visible ASCII');
     let url;
     try { url = new URL(config.databaseUrl); } catch { throw new Error('Invalid DATABASE_URL'); }
     if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || !url.pathname.slice(1)) {
@@ -31,8 +31,12 @@ export function configuration(service, env) {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Invalid API_URL: expected an HTTP origin without credentials');
   }
   if (service === 'api') {
-    config.filesPath = required(env, 'FILES_PATH');
-    if (!isAbsolute(config.filesPath)) throw new Error('Invalid FILES_PATH: expected an absolute mounted directory');
+    for (const [key, name] of [['FAULT_FILL_CAP_BYTES', 'fillCapBytes'], ['FAULT_FILL_FLOOR_BYTES', 'fillFloorBytes']]) {
+      const value = required(env, key);
+      if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`Invalid ${key}: expected a positive safe integer`);
+      config[name] = Number(value);
+    }
+    if (config.fillCapBytes > 64 * 1024 * 1024) throw new Error('Invalid FAULT_FILL_CAP_BYTES: maximum is 67108864');
   }
   return config;
 }

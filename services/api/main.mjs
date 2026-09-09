@@ -1,13 +1,15 @@
+import { faults } from '../faults.mjs';
 import { randomUUID } from 'node:crypto';
 import { configuration, handler, listen, send, authorized, body, containsSecret } from '../common.mjs';
 import { database } from '../database.mjs';
 import { validateJob } from '../worker/ledger.mjs';
 import { files, verifyPrefix } from './files.mjs';
 
-export function createApi(env, dependencies, store, volume) {
+export function createApi(env, dependencies, store, volume, faultControl) {
   const config = configuration('api', env);
+  const control = faultControl ?? faults('api', config);
   const management = handler('api', config, dependencies);
-  return async (req, res) => {
+  return control.wrap(async (req, res) => {
     const reply = (status, value) => send(res, status, value, config.token);
     if (req.url.startsWith('/internal/') && !authorized(req, config.token)) return reply(401, { error: 'Unauthorized worker request' });
     if (['/health/live', '/health/ready', '/version'].includes(req.url)) return management(req, res);
@@ -15,6 +17,7 @@ export function createApi(env, dependencies, store, volume) {
     if (!['GET /', 'GET /ledger', 'GET /files', 'POST /jobs', 'GET /internal/jobs', 'POST /internal/jobs', 'POST /internal/complete', 'POST /internal/checkpoint', 'POST /internal/restore'].includes(route)) return reply(404, { error: 'not-found' });
     if (!store || !volume) return reply(503, { error: 'Missing API state dependencies' });
     try {
+      control.assertDatabase();
       if (route === 'GET /' || route === 'GET /ledger') return reply(200, { service: 'api', rows: await store.rows() });
       if (route === 'GET /files') return reply(200, { files: await volume.list() });
       if (route === 'GET /internal/jobs') return reply(200, { job: await store.nextJob() });
@@ -74,21 +77,24 @@ export function createApi(env, dependencies, store, volume) {
         } catch { return reply(409, { error: 'Complete-prefix restore verification failed' }); }
       }
     } catch (error) {
+      if (error.message === 'EXAMPLE_DATABASE_DOWN') return reply(503, { error: 'EXAMPLE_DATABASE_DOWN' });
       if (error.message === 'Job ID payload conflict') return reply(409, { error: 'Job ID payload conflict' });
       // SQL/network/filesystem errors may contain credentials or user payloads.
       return reply(503, { error: `API operation failed: ${route}` });
     }
-  };
+  });
 }
 
 if (import.meta.main) {
   let db;
   try {
     const config = configuration('api', process.env);
+    const control = faults('api', config);
+    if (!await control.start()) process.exit(1);
     const volume = files(config.filesPath);
     try { await volume.ready(); } catch { throw new Error('FILES_PATH unavailable: mounted directory must exist and be writable'); }
     db = database(config.databaseUrl);
     try { await db.initialize(); } catch { throw new Error('DATABASE_URL unavailable or incompatible ledger schema'); }
-    listen('api', 8081, createApi(process.env, { postgres: db.ready, files: volume.ready }, db, volume), db.close);
+    listen('api', 8081, createApi(process.env, { postgres: db.ready, files: volume.ready }, db, volume, control), async () => { control.close(); await db.close(); });
   } catch (error) { console.error(error.message); await db?.close(); process.exitCode = 1; }
 }

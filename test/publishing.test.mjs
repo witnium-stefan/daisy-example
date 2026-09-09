@@ -38,11 +38,13 @@ test('generated Compose has exactly the reviewed intake shape', () => {
   const source = compose(digests);
   assert.deepEqual(validateCompose(source), digests);
   assert.match(source, /name: daisy-example\nservices:\n/);
-  assert.match(source, /ports: \["8080"\]\n    depends_on: \[api\]\n    environment: \[EXAMPLE_MESSAGE, API_URL\]/);
+  assert.match(source, /ports: \["8080"\]\n    depends_on: \[api\]\n    environment: \[EXAMPLE_MESSAGE, API_URL, EXAMPLE_TOKEN, FILES_PATH\]/);
   assert.match(source, /ports: \["8081"\]\n    depends_on: \[postgres\]/);
   assert.match(source, /ports: \["8082"\]\n    depends_on: \[api, postgres\]/);
-  assert.match(source, /environment: \[DATABASE_URL, EXAMPLE_TOKEN, FILES_PATH\]/);
-  assert.equal([...source.matchAll(/volumes: \["files:\/data"\]/g)].length, 2, 'API shares the existing worker files volume');
+  assert.match(source, /environment: \[DATABASE_URL, EXAMPLE_TOKEN, FILES_PATH, FAULT_FILL_CAP_BYTES, FAULT_FILL_FLOOR_BYTES\]/);
+  assert.equal([...source.matchAll(/volumes: \["files:\/data"\]/g)].length, 3, 'All Node services share the existing files volume for bounded fault records');
+  assert.equal([...source.matchAll(/restart: unless-stopped/g)].length, 3);
+  assert.ok(!source.includes('9090'));
   assert.match(source, /ports: \["5432"\]\n    environment: \[POSTGRES_PASSWORD\]/);
   assert.match(source, /volumes: \["database:\/var\/lib\/postgresql\/data"\]/);
   assert.ok(source.endsWith('volumes:\n  files: {}\n  database: {}\n'));
@@ -55,8 +57,8 @@ test('Compose rejects non-GHCR images, mutable references and unsupported keys',
     source.replace('daisy-example-web@', 'daisy-example-web:latest@'),
     source.replace(`@${digests.web}`, ':latest'),
     source.replace(digests.web, 'sha256:short'),
-    source.replace('EXAMPLE_MESSAGE, API_URL]', 'EXAMPLE_MESSAGE=value]'),
-    source.replace('EXAMPLE_MESSAGE, API_URL]', '${EXAMPLE_MESSAGE}]'),
+    source.replace('EXAMPLE_MESSAGE, API_URL, EXAMPLE_TOKEN, FILES_PATH]', 'EXAMPLE_MESSAGE=value]'),
+    source.replace('EXAMPLE_MESSAGE, API_URL, EXAMPLE_TOKEN, FILES_PATH]', '${EXAMPLE_MESSAGE}]'),
     source.replace('files:/data', './files:/data'),
     source.replace('depends_on: [api]', 'depends_on: [worker]'),
     source.replace('"8080"', '"80:8080"'),

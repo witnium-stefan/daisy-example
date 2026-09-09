@@ -1,3 +1,4 @@
+import { faultFile } from '../faults.mjs';
 import { access, open, readFile, readdir, rename, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
@@ -33,7 +34,7 @@ export function files(directory) {
       return { name, hash: hash(bytes), bytes: Buffer.byteLength(bytes) };
     },
     async list() {
-      const names = (await readdir(directory)).sort();
+      const names = (await readdir(directory)).filter((name) => !faultFile(name)).sort();
       return Promise.all(names.map(async (name) => {
         if (!/^\d{5}\.json$/.test(name)) throw new Error('Unexpected file in FILES_PATH');
         const bytes = await read(name);

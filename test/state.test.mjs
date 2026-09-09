@@ -25,7 +25,7 @@ async function setup(t, store = memoryStore()) {
   const directory = await mkdtemp(join(tmpdir(), 'daisy-state-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const volume = files(directory);
-  const env = { SOURCE_REVISION: 'a'.repeat(40), DATABASE_URL: 'postgresql://unit:unused@postgres/example',
+  const env = { SOURCE_REVISION: 'a'.repeat(40), FAULT_FILL_CAP_BYTES: '1048576', FAULT_FILL_FLOOR_BYTES: '1048576', DATABASE_URL: 'postgresql://unit:unused@postgres/example',
     EXAMPLE_TOKEN: randomBytes(24).toString('hex'), FILES_PATH: directory, EXAMPLE_MESSAGE: 'Visible message' };
   const api = createApi(env, { postgres: async () => {}, files: volume.ready }, store, volume);
   env.API_URL = await serve(t, api);

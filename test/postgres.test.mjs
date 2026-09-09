@@ -11,7 +11,7 @@ test('real PostgreSQL: commit acknowledgment, second session, rollback, and appl
   skip: supplied ? false : 'DATABASE_URL absent: real PostgreSQL evidence unavailable (no default URL)',
 }, async () => {
   // A supplied empty/invalid value is an error, never an optional skip.
-  configuration('worker', { SOURCE_REVISION: 'a'.repeat(40), EXAMPLE_TOKEN: 'test-process-only', API_URL: 'http://api:9090', DATABASE_URL: process.env.DATABASE_URL });
+  configuration('worker', { SOURCE_REVISION: 'a'.repeat(40), EXAMPLE_TOKEN: 'test-process-only', FILES_PATH: '/data', API_URL: 'http://api:9090', DATABASE_URL: process.env.DATABASE_URL });
   const writer = database(process.env.DATABASE_URL), observer = database(process.env.DATABASE_URL);
   let phase = 'initialize';
   try {

@@ -1,11 +1,13 @@
+import { faults } from '../faults.mjs';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configuration, handler, httpReady, listen, apiRequest, containsSecret } from '../common.mjs';
 import { database } from '../database.mjs';
 import { writeLedger } from './ledger.mjs';
 
-export function createWorker(env, dependencies) {
-  return handler('worker', configuration('worker', env), dependencies);
+export function createWorker(env, dependencies, faultControl) {
+  const config = configuration('worker', env);
+  return (faultControl ?? faults('worker', config)).wrap(handler('worker', config, dependencies));
 }
 
 export async function workOnce(store, config) {
@@ -27,13 +29,15 @@ if (import.meta.main) {
   let db;
   try {
     const config = configuration('worker', process.env);
+    const control = faults('worker', config);
+    if (!await control.start()) process.exit(1);
     db = database(config.databaseUrl);
     try { await db.initialize(); } catch { throw new Error('DATABASE_URL unavailable or incompatible ledger schema'); }
     const abort = new AbortController();
     let failed = false;
     const loop = (async () => {
       while (!abort.signal.aborted) {
-        try { await workOnce(db, config); } catch {
+        try { await control.beforeWork(); await workOnce(db, config); } catch {
           failed = true;
           console.error('Worker ledger flow failed; writes stopped');
           break;
@@ -47,6 +51,6 @@ if (import.meta.main) {
         await httpReady(new URL('/health/ready', config.apiUrl), 'api');
         await apiRequest(config, '/internal/jobs');
       }, postgres: db.ready,
-    }), async () => { abort.abort(); await loop; await db.close(); });
+    }, control), async () => { control.close(); abort.abort(); await loop; await db.close(); });
   } catch (error) { console.error(error.message); await db?.close(); process.exitCode = 1; }
 }

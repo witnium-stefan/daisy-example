@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY services/database.mjs services/database.mjs
 COPY services/common.mjs services/common.mjs
+COPY services/faults.mjs services/faults.mjs
 COPY services/api/ services/api/
 COPY services/worker/ledger.mjs services/worker/ledger.mjs
 RUN mkdir /data && chown node:node /data

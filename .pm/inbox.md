@@ -7,3 +7,6 @@
 - 2026-09-09T17:36:18Z · 0003 · growth over budget: GROWTH=652 (55% of 1166 tracked lines) — services and state: web, api and worker flow with real PostgreSQL commits, files on a volume, configuration and secret consumption, health and version endpoints, and the ledger oracle
 - 2026-09-09T17:36:23Z · 0003 · look at this: fnm exec --using 24 -- npm test 2>&1 | tail -5
 - 2026-09-09T17:51:55Z · 0004 · growth over budget: GROWTH=656 (38% of 1704 tracked lines) — failure switches: per-service crash and latency controls plus isolated disk, database and certificate faults, private, bounded, and resettable
+- 2026-09-09T17:59:12Z · 0004 · growth over budget: GROWTH=728 (40% of 1776 tracked lines) — failure switches: per-service crash and latency controls plus isolated disk, database and certificate faults, private, bounded, and resettable
+- 2026-09-09T17:59:20Z · 0004 · look at this: fnm exec --using 24 -- npm test 2>&1 | tail -5
+- 2026-09-09T17:59:20Z · 0004 · LANDED L3 (standing authorization, autonomy=steer): failure switches: per-service crash and latency controls plus isolated disk, database and certificate faults, private, bounded, and resettable · 0 finding(s) closed, 0 open, gates green · range 3a9374cfa99046a55e75db9e341af2bf21ec768f..120f773bfea1dbdf71f7f14fce17630f44a84271

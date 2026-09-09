@@ -1,0 +1,7 @@
+**
+!package.json
+!package-lock.json
+!services/
+!services/**
+!postgres/
+!postgres/Dockerfile

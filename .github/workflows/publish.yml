@@ -1,0 +1,69 @@
+name: Publish reviewed images
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daisy-example-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      SOURCE_REVISION: ${{ github.sha }}
+      DOCKER_CONFIG: ${{ runner.temp }}/daisy-docker
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Unit tests
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+      - name: Authenticate publisher
+        env:
+          GHCR_PUBLISH_TOKEN: ${{ secrets.GHCR_PUBLISH_TOKEN }}
+        run: |
+          if [ -z "$GHCR_PUBLISH_TOKEN" ]; then
+            echo 'Missing required repository secret: GHCR_PUBLISH_TOKEN' >&2
+            exit 1
+          fi
+          printf '%s' "$GHCR_PUBLISH_TOKEN" | docker login ghcr.io --username witnium --password-stdin
+      - name: Build and publish
+        run: |
+          mkdir release
+          docker buildx create --use --name daisy-publisher
+          for service in web api worker postgres; do
+            if [ "$service" = postgres ]; then dockerfile=postgres/Dockerfile; else dockerfile="services/$service/Dockerfile"; fi
+            docker buildx build --platform linux/amd64,linux/arm64 \
+              --file "$dockerfile" --build-arg "SOURCE_REVISION=$SOURCE_REVISION" \
+              --tag "ghcr.io/witnium/daisy-example-$service:$SOURCE_REVISION" \
+              --metadata-file "release/$service.json" --push .
+          done
+      - name: Generate and verify deployment artifact
+        run: |
+          node scripts/compose.mjs release
+          node scripts/verify-visibility.mjs release/images.json > release/visibility.json
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "images-$SOURCE_REVISION" \
+            --target "$SOURCE_REVISION" --title "Images for $SOURCE_REVISION" \
+            --notes 'Reviewed source revision and digest-only Compose artifact. Visibility verified anonymously; this is not deployment or recovery proof.' \
+            release/docker-compose.yaml release/images.json release/visibility.json
+      - name: Remove publisher credentials
+        if: always()
+        run: |
+          docker logout ghcr.io
+          rm -rf "$DOCKER_CONFIG"

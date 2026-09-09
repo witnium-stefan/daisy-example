@@ -1,0 +1,13 @@
+{
+  "name": "daisy-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "test": "node --test",
+    "compose:generate": "node scripts/compose.mjs",
+    "publish:verify": "node scripts/verify-visibility.mjs"
+  },
+  "dependencies": { "pg": "8.16.3" }
+}

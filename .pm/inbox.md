@@ -10,3 +10,4 @@
 - 2026-09-09T17:59:12Z · 0004 · growth over budget: GROWTH=728 (40% of 1776 tracked lines) — failure switches: per-service crash and latency controls plus isolated disk, database and certificate faults, private, bounded, and resettable
 - 2026-09-09T17:59:20Z · 0004 · look at this: fnm exec --using 24 -- npm test 2>&1 | tail -5
 - 2026-09-09T17:59:20Z · 0004 · LANDED L3 (standing authorization, autonomy=steer): failure switches: per-service crash and latency controls plus isolated disk, database and certificate faults, private, bounded, and resettable · 0 finding(s) closed, 0 open, gates green · range 3a9374cfa99046a55e75db9e341af2bf21ec768f..120f773bfea1dbdf71f7f14fce17630f44a84271
+- 2026-09-09T18:06:57Z · 0005 · look at this: fnm exec --using 24 -- npm test 2>&1 | tail -4

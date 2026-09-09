@@ -1,2 +1,3 @@
 - 2026-09-09T17:08:06Z · 0001 · this level needs a live probe: add a line to ## Acceptance starting with 'probe:' that runs against the running world, then run the item again
 - 2026-09-09T17:10:07Z · 0001 · failed: no commit (exit=0) — see /Users/stefan/Projects/Witnium/daisy-example/wt/.runner/rb-0001/build-call.final
+- 2026-09-09T17:20:34Z · 0001 · look at this: fnm exec --using 24 -- node --experimental-strip-types services/api/src/server.ts --version 2>&1 | tail -2 || fnm exec --using 24 -- npm test 2>&1 | tail -4

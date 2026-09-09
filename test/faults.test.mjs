@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -227,7 +229,9 @@ test('crash loops exit nonzero in real child processes at most three times, then
   // Child processes receive secrets only in their environment, never command arguments or output.
   const script = `import { faults } from ${JSON.stringify(new URL('../services/faults.mjs', import.meta.url).href)};
     import { configuration } from ${JSON.stringify(new URL('../services/common.mjs', import.meta.url).href)};
-    import { createServer } from 'node:http';
+    import { createServer, request as httpRequest } from 'node:http';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
     const control = faults('web', configuration('web', process.env));
     if (await control.start()) {
       const server = createServer(control.wrap((_req, res) => res.end('{}')));
@@ -273,3 +277,66 @@ test('disk reset preserves an unexpected filler and other services audit records
   assert.equal(await readFile(join(f.directory, '.fault-web.json'), 'utf8'), 'sibling evidence');
   await assert.rejects(faults('api', f.config).start(), /Unowned fault filler/);
 });
+
+
+test('disk filler ownership is durable before creation and restart can reset it', async (t) => {
+  const f = await setup(t), filler = join(f.directory, '.fault-api.fill');
+  const original = fsPromises.open;
+  let interrupted;
+  const mocked = t.mock.method(fsPromises, 'open', async (path, ...args) => {
+    if (path === filler) {
+      interrupted = await readFile(join(f.directory, '.fault-api.json'), 'utf8');
+      assert.equal(JSON.parse(interrupted).active.parameters.created, true);
+    }
+    return original(path, ...args);
+  });
+  syncBuiltinESMExports();
+  try { assert.equal((await f.request('/faults', { ...metadata(), fault: 'disk-full', bytes: 1024 })).status, 202); }
+  finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  f.control.close();
+  // Reproduce the durable record and empty filler at the creation crash boundary.
+  await writeFile(join(f.directory, '.fault-api.json'), interrupted);
+  await writeFile(filler, '');
+  const restarted = faults('api', f.config, { log() {} });
+  t.after(() => restarted.close());
+  await restarted.start();
+  const origin = await serve(t, restarted.wrap((_req, res) => res.end('{}')));
+  assert.equal((await f.request('/faults/reset', metadata(), f.env.EXAMPLE_TOKEN, origin)).status, 200);
+  await assert.rejects(stat(filler), { code: 'ENOENT' });
+});
+
+for (const path of ['/faults', '/faults/reset', '/jobs']) {
+  test(`unfinished ${path} upload does not bypass fault deadlines or database refusal`, async (t) => {
+    const f = await setup(t);
+    if (path !== '/jobs') assert.equal((await f.request('/faults', {
+      ...metadata(), fault: 'latency', ms: 10, expiresAt: new Date(Date.now() + 200).toISOString(),
+    })).status, 202);
+    const pending = httpRequest(f.url + path, { method: 'POST', headers: { authorization: `Bearer ${f.env.EXAMPLE_TOKEN}` } });
+    pending.on('error', () => {});
+    t.after(() => pending.destroy());
+    const response = once(pending, 'response');
+    pending.write('{');
+    await delay(50);
+    if (path === '/jobs') {
+      let transactions = 0;
+      f.store.transaction = async () => { transactions++; throw new Error('Unexpected transaction'); };
+      assert.equal((await f.request('/faults', { ...metadata(), fault: 'database-down' })).status, 202);
+      pending.end('"id":"late-upload","payload":"safe"}');
+      const [res] = await response;
+      let text = '';
+      for await (const chunk of res) text += chunk;
+      assert.equal(res.statusCode, 503);
+      assert.deepEqual(JSON.parse(text), { error: 'EXAMPLE_DATABASE_DOWN' });
+      assert.equal(transactions, 0);
+    } else {
+      await delay(220);
+      assert.equal((await f.request()).body.active, null);
+      assert.equal((await f.request()).body.lastReset.reason, 'expired');
+      assert.equal((await f.request('/faults/reset', metadata())).status, 200);
+      pending.end('}');
+      const [res] = await response;
+      res.resume();
+      assert.equal(res.statusCode, 400);
+    }
+  });
+}

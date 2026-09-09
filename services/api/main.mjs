@@ -24,6 +24,7 @@ export function createApi(env, dependencies, store, volume, faultControl) {
       if (route === 'POST /jobs' || route === 'POST /internal/jobs') {
         let job;
         try { job = await body(req, config.token); validateJob(job); } catch { return reply(400, { error: 'Invalid job or secret-bearing content' }); }
+        control.assertDatabase();
         await store.transaction(async (tx) => {
           const existing = await tx.findJob(job.id);
           if (existing && existing.payload !== job.payload) throw new Error('Job ID payload conflict');

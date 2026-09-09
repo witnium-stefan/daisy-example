@@ -1,4 +1,4 @@
-import { open, rename, unlink, statfs, stat, access } from 'node:fs/promises';
+import { open, rename, unlink, statfs, stat, lstat, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -78,10 +78,14 @@ export function faults(service, config, { exit = (code) => process.exit(code), l
     const available = async () => { const info = await statfs(config.filesPath, { bigint: true }); return info.bavail * info.bsize; };
     const requested = active.parameters.bytes;
     if (await available() - BigInt(requested) < BigInt(config.fillFloorBytes)) throw new Error('Fault free-space floor refused');
-    const file = await open(fillPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try { await lstat(fillPath); throw new Error('Unowned fault filler: creation refused'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    active.parameters.created = true;
+    await save();
+    let file;
+    try { file = await open(fillPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
+    catch (error) { active.parameters.created = false; throw error; }
     try {
-      active.parameters.created = true;
-      await save();
       const chunk = Buffer.alloc(Math.min(requested, 1024 * 1024));
       while (active.parameters.writtenBytes < requested) {
         if (now() >= Date.parse(active.expiresAt)) throw new Error('Disk-fill lease expired');
@@ -189,12 +193,12 @@ export function faults(service, config, { exit = (code) => process.exit(code), l
           }
           if (req.method === 'GET' && req.url === '/faults') return reply(200, snapshot());
           if (req.method !== 'POST') return reply(405, { error: 'method-not-allowed' });
+          let input, context;
+          try { input = await body(req, config.token, 4096); context = metadata(input); }
+          catch { return reply(400, { error: 'Invalid fault metadata, secret-bearing content, or lease' }); }
           if (busy) return reply(409, { error: 'Fault control busy' });
           busy = true;
           try {
-            let input, context;
-            try { input = await body(req, config.token, 4096); context = metadata(input); }
-            catch { return reply(400, { error: 'Invalid fault metadata, secret-bearing content, or lease' }); }
             await expire();
             if (req.url === '/faults/reset') { await reset(context.actor, 'operator-reset', context); return reply(200, snapshot()); }
             if (active) return reply(409, { error: 'Reset the active fault first' });

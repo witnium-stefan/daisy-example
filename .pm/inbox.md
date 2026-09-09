@@ -4,3 +4,5 @@
 - 2026-09-09T17:22:46Z · 0002 · failed: no commit (exit=0) — see /Users/stefan/Projects/Witnium/daisy-example/wt/.runner/rb-0002/build-call.final
 - 2026-09-09T17:24:06Z · 0002 · escalated L1->L2 by paths:   .dockerignore  .gitignore  fixtures/ledger.json
 - 2026-09-09T17:24:12Z · 0002 · look at this: - A1. The check succeeds: fnm exec --using 24 -- npm test
+- 2026-09-09T17:36:18Z · 0003 · growth over budget: GROWTH=652 (55% of 1166 tracked lines) — services and state: web, api and worker flow with real PostgreSQL commits, files on a volume, configuration and secret consumption, health and version endpoints, and the ledger oracle
+- 2026-09-09T17:36:23Z · 0003 · look at this: fnm exec --using 24 -- npm test 2>&1 | tail -5

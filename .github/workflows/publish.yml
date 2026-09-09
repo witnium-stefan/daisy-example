@@ -16,7 +16,6 @@ jobs:
       contents: write
     env:
       SOURCE_REVISION: ${{ github.sha }}
-      DOCKER_CONFIG: ${{ runner.temp }}/daisy-docker
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -31,6 +30,7 @@ jobs:
           npm test
       - name: Authenticate publisher
         env:
+          DOCKER_CONFIG: ${{ runner.temp }}/daisy-docker
           GHCR_PUBLISH_TOKEN: ${{ secrets.GHCR_PUBLISH_TOKEN }}
         run: |
           if [ -z "$GHCR_PUBLISH_TOKEN" ]; then
@@ -39,6 +39,8 @@ jobs:
           fi
           printf '%s' "$GHCR_PUBLISH_TOKEN" | docker login ghcr.io --username witnium --password-stdin
       - name: Build and publish
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/daisy-docker
         run: |
           mkdir release
           docker buildx create --use --name daisy-publisher
@@ -64,6 +66,8 @@ jobs:
             release/docker-compose.yaml release/images.json release/visibility.json
       - name: Remove publisher credentials
         if: always()
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/daisy-docker
         run: |
           docker logout ghcr.io
           rm -rf "$DOCKER_CONFIG"

@@ -9,6 +9,31 @@ import { verifyVisibility } from '../scripts/verify-visibility.mjs';
 // Synthetic digests are confined to tests; deployment output uses build metadata.
 const digests = Object.fromEntries(services.map((name, i) => [name, `sha256:${String(i + 1).repeat(64)}`]));
 
+test('publish workflow only references runner context within job steps', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8');
+  let inJobs = false;
+  let inSteps = false;
+  let jobs = 0;
+  let steps = 0;
+  for (const [index, line] of workflow.split('\n').entries()) {
+    if (/^\S/.test(line)) {
+      inJobs = line === 'jobs:';
+      inSteps = false;
+    }
+    if (inJobs && /^  [\w-]+:\s*$/.test(line)) {
+      inSteps = false;
+      jobs++;
+    }
+    if (inJobs && /^    steps:\s*$/.test(line)) {
+      inSteps = true;
+      steps++;
+    }
+    if (!inSteps) assert.ok(!line.includes('runner.'), `Runner context outside steps at line ${index + 1}: ${line}`);
+  }
+  assert.ok(jobs > 0, 'Expected publish jobs');
+  assert.equal(steps, jobs, 'Expected steps in every publish job');
+});
+
 test('generated Compose has exactly the reviewed intake shape', () => {
   const source = compose(digests);
   assert.deepEqual(validateCompose(source), digests);

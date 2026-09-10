@@ -4,7 +4,7 @@ import { configuration, handler, httpReady, listen, apiRequest, body, send, cont
 export function createWeb(env, dependencies, faultControl) {
   const config = configuration('web', env);
   const management = handler('web', config, dependencies);
-  const control = faultControl ?? faults('web', config);
+  const control = faultControl ?? faults('web', config, { clock: { now: Date.now, setTimeout, clearTimeout } });
   return control.wrap(async (req, res) => {
     if (['/health/live', '/health/ready', '/version'].includes(req.url)) return management(req, res);
     try {
@@ -32,7 +32,7 @@ export function createWeb(env, dependencies, faultControl) {
 if (import.meta.main) {
   try {
     const config = configuration('web', process.env);
-    const control = faults('web', config);
+    const control = faults('web', config, { clock: { now: Date.now, setTimeout, clearTimeout } });
     if (await control.start()) listen('web', 8080, createWeb(process.env, { api: () => httpReady(new URL('/health/ready', config.apiUrl), 'api') }, control), async () => control.close());
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

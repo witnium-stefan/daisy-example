@@ -11,7 +11,11 @@ export const faultFile = (name) => /^\.fault-(web|api|worker)\.json(?:\.tmp)?$/.
 const identifier = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
 
 // One bounded record per service; no token, headers, or raw exception text is retained.
-export function faults(service, config, { exit = (code) => process.exit(code), log = (line) => console.log(line), now = Date.now } = {}) {
+export function faults(service, config, { exit = (code) => process.exit(code), log = (line) => console.log(line), clock } = {}) {
+  if (!clock || ['now', 'setTimeout', 'clearTimeout'].some((method) => typeof clock[method] !== 'function')) {
+    throw new Error('Fault clock requires now, setTimeout, and clearTimeout');
+  }
+  const now = () => clock.now();
   const recordPath = join(config.filesPath, `.fault-${service}.json`);
   const fillPath = join(config.filesPath, '.fault-api.fill');
   let active = null, lastSet = null, lastReset = null, denial = null, busy = false, crashing = false, timer;
@@ -39,16 +43,16 @@ export function faults(service, config, { exit = (code) => process.exit(code), l
     active = null;
     lastReset = { ...previous, resetContext: context, resetActor: actor, resetAt: new Date(now()).toISOString(), reason };
     try { await save(); } catch (error) { active = previous; lastReset = previousReset; throw error; }
-    clearTimeout(timer);
+    clock.clearTimeout(timer);
     emit('fault-reset', lastReset);
   };
   const expire = async () => {
     if (active && now() >= Date.parse(active.expiresAt)) await reset('lease-expiration', 'expired');
   };
   const schedule = () => {
-    clearTimeout(timer);
+    clock.clearTimeout(timer);
     if (!active) return;
-    timer = setTimeout(async () => {
+    timer = clock.setTimeout(async () => {
       if (busy) { schedule(); return; }
       busy = true;
       try { await expire(); } catch { emit('fault-reset-failed', { fault: active?.fault, reason: 'Reset failed; residual fault requires operator intervention' }); }
@@ -170,7 +174,7 @@ export function faults(service, config, { exit = (code) => process.exit(code), l
       schedule();
       return true;
     },
-    close() { clearTimeout(timer); },
+    close() { clock.clearTimeout(timer); },
     status: snapshot,
     reason() { return active ? (active.fault === 'database-down' ? 'EXAMPLE_DATABASE_DOWN' : `fault:${active.fault}${active.parameters?.failed ? ':fill-failed' : ''}`) : null; },
     assertDatabase() { if (active?.fault === 'database-down') throw new Error('EXAMPLE_DATABASE_DOWN'); },

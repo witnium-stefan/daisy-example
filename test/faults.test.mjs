@@ -14,12 +14,37 @@ import { createWeb } from '../services/web/main.mjs';
 import { createApi } from '../services/api/main.mjs';
 import { createWorker } from '../services/worker/main.mjs';
 import { applicationHandler, configuration } from '../services/common.mjs';
-import { faults, MAX_LATENCY_MS, MAX_CRASHES } from '../services/faults.mjs';
+import { faults, MAX_LATENCY_MS, MAX_CRASHES, MAX_LEASE_MS } from '../services/faults.mjs';
 import { files, verifyPrefix } from '../services/api/files.mjs';
 import { memoryStore } from './support/store.mjs';
 
-const metadata = () => ({ actor: 'operator-one', runId: 'fault-unit', operationId: randomUUID(), targetScope: 'isolated-unit',
-  imageDigest: `sha256:${'b'.repeat(64)}`, expiresAt: new Date(Date.now() + 60000).toISOString() });
+const metadata = (clock = { now: Date.now }) => ({ actor: 'operator-one', runId: 'fault-unit', operationId: randomUUID(), targetScope: 'isolated-unit',
+  imageDigest: `sha256:${'b'.repeat(64)}`, expiresAt: new Date(clock.now() + 60000).toISOString() });
+function manualClock() {
+  let time = Date.UTC(2026, 8, 10);
+  const timers = new Map();
+  return {
+    now: () => time,
+    setTimeout(callback, ms) {
+      const timer = { unref() {} };
+      timers.set(timer, { callback, at: time + ms });
+      return timer;
+    },
+    clearTimeout(timer) { timers.delete(timer); },
+    async advance(ms) {
+      const target = time + ms;
+      while (true) {
+        const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next || next[1].at > target) break;
+        time = next[1].at;
+        timers.delete(next[0]);
+        await next[1].callback();
+      }
+      time = target;
+    },
+  };
+}
+
 async function serve(t, handler) {
   const server = createServer(handler);
   server.listen(0, '127.0.0.1');
@@ -33,9 +58,9 @@ async function setup(t, service = 'api', overrides = {}) {
   const env = { SOURCE_REVISION: 'a'.repeat(40), EXAMPLE_TOKEN: randomBytes(24).toString('hex'), FILES_PATH: directory,
     DATABASE_URL: 'postgresql://fixture:unused@postgres/example', API_URL: 'http://api:9090', EXAMPLE_MESSAGE: 'Example',
     FAULT_FILL_CAP_BYTES: '1048576', FAULT_FILL_FLOOR_BYTES: '1048576', ...overrides };
-  const output = [], exits = [];
+  const output = [], exits = [], clock = manualClock();
   const config = configuration(service, env);
-  const control = faults(service, config, { log: (line) => output.push(line), exit: (code) => exits.push(code) });
+  const control = faults(service, config, { clock, log: (line) => output.push(line), exit: (code) => exits.push(code) });
   await control.start();
   t.after(() => control.close());
   const volume = files(directory), store = memoryStore();
@@ -50,14 +75,14 @@ async function setup(t, service = 'api', overrides = {}) {
     output.push(text);
     return { status: response.status, body: JSON.parse(text) };
   };
-  return { env, config, directory, output, exits, control, request, store, volume, url, publicUrl };
+  return { env, config, clock, handler, directory, output, exits, control, request, store, volume, url, publicUrl };
 }
 
 for (const service of ['web', 'api', 'worker']) {
   test(`${service}: unauthorized fault controls are observable, immutable, private, and secret-free`, async (t) => {
     const f = await setup(t, service);
     for (const token of ['', 'invalid', f.env.EXAMPLE_TOKEN + '-wrong']) {
-      for (const [path, value] of [['/faults', undefined], ['/faults', { ...metadata(), fault: 'crash', mode: 'immediate' }], ['/faults/reset', metadata()]]) {
+      for (const [path, value] of [['/faults', undefined], ['/faults', { ...metadata(f.clock), fault: 'crash', mode: 'immediate' }], ['/faults/reset', metadata(f.clock)]]) {
         assert.equal((await f.request(path, value, token)).status, 401);
       }
     }
@@ -67,17 +92,17 @@ for (const service of ['web', 'api', 'worker']) {
     assert.match(status.denial.reason, /Unauthorized/);
     assert.ok(f.output.some((line) => line.includes('fault-denied')));
     for (const path of ['/faults', '/faults/reset', '/faults?x=1', '/internal/jobs', '/health/ready']) {
-      assert.equal((await f.request(path, metadata(), f.env.EXAMPLE_TOKEN, f.publicUrl)).status, 404);
+      assert.equal((await f.request(path, metadata(f.clock), f.env.EXAMPLE_TOKEN, f.publicUrl)).status, 404);
     }
     for (const field of ['actor', 'runId', 'operationId', 'targetScope', 'extra']) {
-      assert.equal((await f.request('/faults', { ...metadata(), [field]: f.env.EXAMPLE_TOKEN, fault: 'latency', ms: 10 })).status, 400);
+      assert.equal((await f.request('/faults', { ...metadata(f.clock), [field]: f.env.EXAMPLE_TOKEN, fault: 'latency', ms: 10 })).status, 400);
     }
-    assert.equal((await f.request('/faults', { ...metadata(), expiresAt: new Date(Date.now() - 1000).toISOString(), fault: 'crash', mode: 'immediate' })).status, 400);
-    assert.equal((await f.request('/faults', { ...metadata(), expiresAt: new Date(Date.now() + 3000010).toISOString(), fault: 'latency', ms: 10 })).status, 400);
-    assert.equal((await f.request('/faults', { ...metadata(), fault: 'latency', ms: 20 })).status, 202);
-    assert.equal((await f.request('/faults/reset', metadata(), 'wrong')).status, 401);
+    assert.equal((await f.request('/faults', { ...metadata(f.clock), expiresAt: new Date(f.clock.now() - 1000).toISOString(), fault: 'crash', mode: 'immediate' })).status, 400);
+    assert.equal((await f.request('/faults', { ...metadata(f.clock), expiresAt: new Date(f.clock.now() + 3000010).toISOString(), fault: 'latency', ms: 10 })).status, 400);
+    assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'latency', ms: 20 })).status, 202);
+    assert.equal((await f.request('/faults/reset', metadata(f.clock), 'wrong')).status, 401);
     assert.equal((await f.request()).body.active.fault, 'latency');
-    assert.equal((await f.request('/faults/reset', metadata())).status, 200);
+    assert.equal((await f.request('/faults/reset', metadata(f.clock))).status, 200);
     for (const name of await readdir(f.directory)) f.output.push(await readFile(join(f.directory, name), 'utf8'));
     assert.equal(f.output.join('\n').includes(f.env.EXAMPLE_TOKEN), false);
     assert.deepEqual(f.exits, []);
@@ -85,11 +110,11 @@ for (const service of ['web', 'api', 'worker']) {
 
   test(`${service}: latency has a measured symptom, hard bound, audited reset, and honest health`, async (t) => {
     const f = await setup(t, service);
-    for (const ms of [0, -1, 1.1, MAX_LATENCY_MS + 1, '100']) assert.equal((await f.request('/faults', { ...metadata(), fault: 'latency', ms })).status, 400);
-    assert.equal((await f.request('/faults', { ...metadata(), fault: 'latency', ms: MAX_LATENCY_MS })).status, 202);
+    for (const ms of [0, -1, 1.1, MAX_LATENCY_MS + 1, '100']) assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'latency', ms })).status, 400);
+    assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'latency', ms: MAX_LATENCY_MS })).status, 202);
     assert.equal((await f.request()).body.active.parameters.ms, MAX_LATENCY_MS);
-    await f.request('/faults/reset', metadata());
-    const set = (await f.request('/faults', { ...metadata(), fault: 'latency', ms: 100 })).body;
+    await f.request('/faults/reset', metadata(f.clock));
+    const set = (await f.request('/faults', { ...metadata(f.clock), fault: 'latency', ms: 100 })).body;
     assert.equal(set.active.actor, 'operator-one');
     assert.ok(set.active.setAt);
     assert.equal((await f.request('/health/live')).status, 200);
@@ -102,8 +127,8 @@ for (const service of ['web', 'api', 'worker']) {
     if (service === 'worker') {
       started = performance.now(); await f.control.beforeWork(); assert.ok(performance.now() - started >= 90);
     }
-    assert.equal((await f.request('/faults', { ...metadata(), fault: 'crash', mode: 'immediate' })).status, 409);
-    const reset = (await f.request('/faults/reset', { ...metadata(), actor: 'operator-two' })).body;
+    assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'crash', mode: 'immediate' })).status, 409);
+    const reset = (await f.request('/faults/reset', { ...metadata(f.clock), actor: 'operator-two' })).body;
     assert.equal(reset.active, null);
     assert.equal(reset.lastReset.resetActor, 'operator-two');
     assert.equal(reset.lastReset.operationId, set.active.operationId);
@@ -115,20 +140,20 @@ for (const service of ['web', 'api', 'worker']) {
 
   test(`${service}: next-request crash can be reset; immediate crash exits once and records completion`, async (t) => {
     const f = await setup(t, service);
-    assert.equal((await f.request('/faults', { ...metadata(), fault: 'crash', mode: 'next-request' })).status, 202);
+    assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'crash', mode: 'next-request' })).status, 202);
     assert.equal((await f.request('/health/ready')).body.reason, 'fault:crash');
     assert.deepEqual(f.exits, []);
-    await f.request('/faults/reset', metadata());
+    await f.request('/faults/reset', metadata(f.clock));
     await f.request('/unrecognized');
     assert.deepEqual(f.exits, []);
-    await f.request('/faults', { ...metadata(), fault: 'crash', mode: 'next-request' });
+    await f.request('/faults', { ...metadata(f.clock), fault: 'crash', mode: 'next-request' });
     await f.request('/unrecognized');
     assert.deepEqual(f.exits, [1]);
     // A real process ends at this point; create a fresh controller for immediate mode.
-    const fresh = faults(service, f.config, { exit: (code) => f.exits.push(code), log: (line) => f.output.push(line) });
+    const fresh = faults(service, f.config, { clock: f.clock, exit: (code) => f.exits.push(code), log: (line) => f.output.push(line) });
     await fresh.start(); t.after(() => fresh.close());
     const origin = await serve(t, fresh.wrap(async (_req, res) => { res.end('{}'); }));
-    await f.request('/faults', { ...metadata(), fault: 'crash', mode: 'immediate' }, f.env.EXAMPLE_TOKEN, origin);
+    await f.request('/faults', { ...metadata(f.clock), fault: 'crash', mode: 'immediate' }, f.env.EXAMPLE_TOKEN, origin);
     for (let i = 0; i < 100 && f.exits.length < 2; i++) await delay(10);
     assert.deepEqual(f.exits, [1, 1]);
     assert.equal(fresh.status().active, null);
@@ -143,13 +168,13 @@ test('API database-down refuses pool use by name, preserves committed rows, and 
   let calls = 0;
   const original = f.store.rows;
   f.store.rows = async () => { calls++; return original(); };
-  assert.equal((await f.request('/faults', { ...metadata(), fault: 'database-down' })).status, 202);
+  assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'database-down' })).status, 202);
   assert.equal((await f.request('/health/ready')).body.reason, 'EXAMPLE_DATABASE_DOWN');
   assert.equal((await f.request('/health/live')).status, 200);
   assert.deepEqual(await f.request('/ledger'), { status: 503, body: { error: 'EXAMPLE_DATABASE_DOWN' } });
   assert.equal((await f.request('/internal/jobs')).status, 503);
   assert.equal(calls, 0, 'fault refuses the store before acquiring a pool connection');
-  await f.request('/faults/reset', metadata());
+  await f.request('/faults/reset', metadata(f.clock));
   assert.equal((await f.request('/ledger')).status, 200);
   assert.equal((await f.request('/internal/jobs')).body.job.id, 'retained');
   assert.equal((await f.request('/health/ready')).status, 200);
@@ -157,8 +182,8 @@ test('API database-down refuses pool use by name, preserves committed rows, and 
 
 test('API bounded disk fill preserves the ledger manifest and resets after process restart', async (t) => {
   const f = await setup(t);
-  for (const bytes of [0, -1, 1.5, 1048577, '100']) assert.equal((await f.request('/faults', { ...metadata(), fault: 'disk-full', bytes })).status, 400);
-  const set = await f.request('/faults', { ...metadata(), fault: 'disk-full', bytes: 1048576 });
+  for (const bytes of [0, -1, 1.5, 1048577, '100']) assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'disk-full', bytes })).status, 400);
+  const set = await f.request('/faults', { ...metadata(f.clock), fault: 'disk-full', bytes: 1048576 });
   assert.equal(set.status, 202);
   assert.equal(set.body.active.parameters.writtenBytes, 1048576);
   assert.equal((await stat(join(f.directory, '.fault-api.fill'))).size, 1048576);
@@ -166,11 +191,11 @@ test('API bounded disk fill preserves the ledger manifest and resets after proce
   assert.equal((await f.request('/health/live')).status, 200);
   assert.deepEqual(await f.volume.list(), []);
   await verifyPrefix({ format: 1, checkpointId: 'unchanged', watermark: 0, rows: [], files: [] }, [], f.volume);
-  const restarted = faults('api', f.config, { log: (line) => f.output.push(line) });
+  const restarted = faults('api', f.config, { clock: f.clock, log: (line) => f.output.push(line) });
   await restarted.start(); t.after(() => restarted.close());
   assert.equal(restarted.status().active.parameters.writtenBytes, 1048576);
   const origin = await serve(t, restarted.wrap(async (_req, res) => res.end('{}')));
-  const reset = await f.request('/faults/reset', metadata(), f.env.EXAMPLE_TOKEN, origin);
+  const reset = await f.request('/faults/reset', metadata(f.clock), f.env.EXAMPLE_TOKEN, origin);
   assert.equal(reset.status, 200);
   await assert.rejects(stat(join(f.directory, '.fault-api.fill')), { code: 'ENOENT' });
   assert.equal(restarted.reason(), null);
@@ -183,26 +208,39 @@ test('API bounded disk fill preserves the ledger manifest and resets after proce
 
 test('disk fill refuses the required free-space floor and leaves a resettable named symptom', async (t) => {
   const f = await setup(t, 'api', { FAULT_FILL_FLOOR_BYTES: String(Number.MAX_SAFE_INTEGER) });
-  const response = await f.request('/faults', { ...metadata(), fault: 'disk-full', bytes: 100 });
+  const response = await f.request('/faults', { ...metadata(f.clock), fault: 'disk-full', bytes: 100 });
   assert.equal(response.status, 503);
   assert.equal(response.body.active.parameters.writtenBytes, 0);
   await assert.rejects(stat(join(f.directory, '.fault-api.fill')), { code: 'ENOENT' });
   assert.equal((await f.request('/health/ready')).body.reason, 'fault:disk-full:fill-failed');
-  assert.equal((await f.request('/faults/reset', metadata())).status, 200);
+  assert.equal((await f.request('/faults/reset', metadata(f.clock))).status, 200);
   assert.equal((await f.request('/health/ready')).status, 200);
 });
 
 test('leases automatically reset latency and disk fill with bounded audit storage', async (t) => {
   const f = await setup(t);
   for (const fault of [{ fault: 'latency', ms: 10 }, { fault: 'disk-full', bytes: 1024 }]) {
-    assert.equal((await f.request('/faults', { ...metadata(), ...fault, expiresAt: new Date(Date.now() + 100).toISOString() })).status, 202);
-    await delay(160);
+    assert.equal((await f.request('/faults', { ...metadata(f.clock), ...fault, expiresAt: new Date(f.clock.now() + MAX_LEASE_MS).toISOString() })).status, 202);
+    await f.clock.advance(MAX_LEASE_MS - 1);
+    assert.equal(f.control.status().active.fault, fault.fault);
+    await f.clock.advance(1);
+    assert.equal(f.control.status().active, null);
+    assert.equal(f.control.status().lastReset.resetActor, 'lease-expiration');
+    assert.equal(f.control.status().lastReset.resetAt, new Date(f.clock.now()).toISOString());
     assert.equal((await f.request()).body.active, null);
     assert.equal((await f.request()).body.lastReset.reason, 'expired');
     assert.equal((await f.request('/health/ready')).status, 200);
   }
   assert.ok((await stat(join(f.directory, '.fault-api.json'))).size < 8192);
   assert.deepEqual(await readdir(f.directory), ['.fault-api.json']);
+});
+
+test('fault construction requires an explicit complete clock', () => {
+  assert.throws(() => faults('api', {}), /Fault clock requires now, setTimeout, and clearTimeout/);
+  for (const method of ['now', 'setTimeout', 'clearTimeout']) {
+    assert.throws(() => faults('api', {}, { clock: { ...manualClock(), [method]: undefined } }),
+      /Fault clock requires now, setTimeout, and clearTimeout/);
+  }
 });
 
 test('missing bounds and malformed fault state fail specifically without deleting existing bytes', async (t) => {
@@ -213,26 +251,26 @@ test('missing bounds and malformed fault state fail specifically without deletin
   assert.throws(() => configuration('api', { ...f.env, FAULT_FILL_CAP_BYTES: '67108865' }), /FAULT_FILL_CAP_BYTES/);
   const path = join(f.directory, '.fault-api.json');
   await writeFile(path, '{broken');
-  await assert.rejects(faults('api', f.config).start(), /Invalid fault record/);
+  await assert.rejects(faults('api', f.config, { clock: f.clock }).start(), /Invalid fault record/);
   assert.equal(await readFile(path, 'utf8'), '{broken');
   await rm(path);
   const outside = join(f.directory, 'existing-data');
   await writeFile(outside, 'preserve');
   await symlink(outside, path);
-  await assert.rejects(faults('api', f.config).start(), /Invalid fault record/);
+  await assert.rejects(faults('api', f.config, { clock: f.clock }).start(), /Invalid fault record/);
   assert.equal(await readFile(outside, 'utf8'), 'preserve');
 });
 
 test('crash loops exit nonzero in real child processes at most three times, then reset', async (t) => {
   const f = await setup(t, 'web');
-  for (const starts of [0, MAX_CRASHES + 1, 1.5]) assert.equal((await f.request('/faults', { ...metadata(), fault: 'crash-loop', starts })).status, 400);
+  for (const starts of [0, MAX_CRASHES + 1, 1.5]) assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'crash-loop', starts })).status, 400);
   // Child processes receive secrets only in their environment, never command arguments or output.
   const script = `import { faults } from ${JSON.stringify(new URL('../services/faults.mjs', import.meta.url).href)};
     import { configuration } from ${JSON.stringify(new URL('../services/common.mjs', import.meta.url).href)};
     import { createServer, request as httpRequest } from 'node:http';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-    const control = faults('web', configuration('web', process.env));
+    const control = faults('web', configuration('web', process.env), { clock: { now: Date.now, setTimeout, clearTimeout } });
     if (await control.start()) {
       const server = createServer(control.wrap((_req, res) => res.end('{}')));
       server.listen(0, '127.0.0.1', () => process.send({ port: server.address().port, status: control.status() }));
@@ -269,13 +307,13 @@ test('disk reset preserves an unexpected filler and other services audit records
   const filler = join(f.directory, '.fault-api.fill');
   await writeFile(filler, 'existing bytes');
   await writeFile(join(f.directory, '.fault-web.json'), 'sibling evidence');
-  const result = await f.request('/faults', { ...metadata(), fault: 'disk-full', bytes: 100 });
+  const result = await f.request('/faults', { ...metadata(f.clock), fault: 'disk-full', bytes: 100 });
   assert.equal(result.status, 503);
   assert.equal(result.body.active.parameters.created, false);
-  assert.equal((await f.request('/faults/reset', metadata())).status, 200);
+  assert.equal((await f.request('/faults/reset', metadata(f.clock))).status, 200);
   assert.equal(await readFile(filler, 'utf8'), 'existing bytes');
   assert.equal(await readFile(join(f.directory, '.fault-web.json'), 'utf8'), 'sibling evidence');
-  await assert.rejects(faults('api', f.config).start(), /Unowned fault filler/);
+  await assert.rejects(faults('api', f.config, { clock: f.clock }).start(), /Unowned fault filler/);
 });
 
 
@@ -291,17 +329,17 @@ test('disk filler ownership is durable before creation and restart can reset it'
     return original(path, ...args);
   });
   syncBuiltinESMExports();
-  try { assert.equal((await f.request('/faults', { ...metadata(), fault: 'disk-full', bytes: 1024 })).status, 202); }
+  try { assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'disk-full', bytes: 1024 })).status, 202); }
   finally { mocked.mock.restore(); syncBuiltinESMExports(); }
   f.control.close();
   // Reproduce the durable record and empty filler at the creation crash boundary.
   await writeFile(join(f.directory, '.fault-api.json'), interrupted);
   await writeFile(filler, '');
-  const restarted = faults('api', f.config, { log() {} });
+  const restarted = faults('api', f.config, { clock: f.clock, log() {} });
   t.after(() => restarted.close());
   await restarted.start();
   const origin = await serve(t, restarted.wrap((_req, res) => res.end('{}')));
-  assert.equal((await f.request('/faults/reset', metadata(), f.env.EXAMPLE_TOKEN, origin)).status, 200);
+  assert.equal((await f.request('/faults/reset', metadata(f.clock), f.env.EXAMPLE_TOKEN, origin)).status, 200);
   await assert.rejects(stat(filler), { code: 'ENOENT' });
 });
 
@@ -309,18 +347,21 @@ for (const path of ['/faults', '/faults/reset', '/jobs']) {
   test(`unfinished ${path} upload does not bypass fault deadlines or database refusal`, async (t) => {
     const f = await setup(t);
     if (path !== '/jobs') assert.equal((await f.request('/faults', {
-      ...metadata(), fault: 'latency', ms: 10, expiresAt: new Date(Date.now() + 200).toISOString(),
+      ...metadata(f.clock), fault: 'latency', ms: 10, expiresAt: new Date(f.clock.now() + MAX_LEASE_MS).toISOString(),
     })).status, 202);
-    const pending = httpRequest(f.url + path, { method: 'POST', headers: { authorization: `Bearer ${f.env.EXAMPLE_TOKEN}` } });
+    let received;
+    const incoming = new Promise((resolve) => { received = resolve; });
+    const origin = await serve(t, (req, res) => { const result = f.handler(req, res); received(); return result; });
+    const pending = httpRequest(origin + path, { method: 'POST', headers: { authorization: `Bearer ${f.env.EXAMPLE_TOKEN}` } });
     pending.on('error', () => {});
     if (path === '/jobs') {
       t.after(() => pending.destroy());
       const response = once(pending, 'response');
       pending.write('{');
-      await delay(50);
+      await incoming;
       let transactions = 0;
       f.store.transaction = async () => { transactions++; throw new Error('Unexpected transaction'); };
-      assert.equal((await f.request('/faults', { ...metadata(), fault: 'database-down' })).status, 202);
+      assert.equal((await f.request('/faults', { ...metadata(f.clock), fault: 'database-down' })).status, 202);
       pending.end('"id":"late-upload","payload":"safe"}');
       const [res] = await response;
       let text = '';
@@ -337,11 +378,11 @@ for (const path of ['/faults', '/faults/reset', '/jobs']) {
       let res;
       try {
         pending.write('{');
-        await delay(50);
-        await delay(220);
+        await incoming;
+        await f.clock.advance(MAX_LEASE_MS);
         assert.equal((await f.request()).body.active, null);
         assert.equal((await f.request()).body.lastReset.reason, 'expired');
-        assert.equal((await f.request('/faults/reset', metadata())).status, 200);
+        assert.equal((await f.request('/faults/reset', metadata(f.clock))).status, 200);
         pending.end('}');
         [res] = await response;
         for await (const chunk of res) { /* Drain the response before teardown. */ }

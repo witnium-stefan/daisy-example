@@ -7,7 +7,7 @@ import { writeLedger } from './ledger.mjs';
 
 export function createWorker(env, dependencies, faultControl) {
   const config = configuration('worker', env);
-  return (faultControl ?? faults('worker', config)).wrap(handler('worker', config, dependencies));
+  return (faultControl ?? faults('worker', config, { clock: { now: Date.now, setTimeout, clearTimeout } })).wrap(handler('worker', config, dependencies));
 }
 
 export async function workOnce(store, config) {
@@ -29,7 +29,7 @@ if (import.meta.main) {
   let db;
   try {
     const config = configuration('worker', process.env);
-    const control = faults('worker', config);
+    const control = faults('worker', config, { clock: { now: Date.now, setTimeout, clearTimeout } });
     if (!await control.start()) process.exit(1);
     db = database(config.databaseUrl);
     try { await db.initialize(); } catch { throw new Error('DATABASE_URL unavailable or incompatible ledger schema'); }

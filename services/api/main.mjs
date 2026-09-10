@@ -7,7 +7,7 @@ import { files, verifyPrefix } from './files.mjs';
 
 export function createApi(env, dependencies, store, volume, faultControl) {
   const config = configuration('api', env);
-  const control = faultControl ?? faults('api', config);
+  const control = faultControl ?? faults('api', config, { clock: { now: Date.now, setTimeout, clearTimeout } });
   const management = handler('api', config, dependencies);
   return control.wrap(async (req, res) => {
     const reply = (status, value) => send(res, status, value, config.token);
@@ -90,7 +90,7 @@ if (import.meta.main) {
   let db;
   try {
     const config = configuration('api', process.env);
-    const control = faults('api', config);
+    const control = faults('api', config, { clock: { now: Date.now, setTimeout, clearTimeout } });
     if (!await control.start()) process.exit(1);
     const volume = files(config.filesPath);
     try { await volume.ready(); } catch { throw new Error('FILES_PATH unavailable: mounted directory must exist and be writable'); }

@@ -14,3 +14,5 @@
 - 2026-09-10T05:59:19Z · 0006 · escalated L1->L2 by paths:   .gitignore
 - 2026-09-10T05:59:28Z · 0006 · look at this: - A1. The check succeeds: fnm exec --using 24 -- npm test
 - 2026-09-10T06:04:09Z · 0007 · look at this: - A1. The check succeeds: fnm exec --using 24 -- npm test
+- 2026-09-10T06:08:20Z · 0008 · escalated L1->L2 by paths:   services/api/main.mjs  services/faults.mjs  services/worker/main.mjs
+- 2026-09-10T06:08:42Z · 0008 · look at this: - A1. The check succeeds: fnm exec --using 24 -- npm test && fnm exec --using 24 -- npm test && fnm exec --using 24 -- npm test

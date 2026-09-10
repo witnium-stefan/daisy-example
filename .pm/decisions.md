@@ -15,3 +15,4 @@
 | 2026-09-10 | Publish run 34443016456 (after the owner made the packages public): build, push, visibility verification and release images-b251cdc… green; the commit-back step failed on .gitignore ignoring docker-compose.yaml — item 0006 landed (72 tests); re-dispatched. | — | PM |
 | 2026-09-10 | Item 0007 landed (72 tests, no asynchronous-activity warnings): the two fault-upload tests await, abort and close what they start; service timers were already correct. Publish re-dispatched. | — | PM |
 | 2026-09-10 | Publish run 34443643144 failed in CI on the timing-sensitive lease test (the same one that flaked under the runbook gate); item 0008 gives the fault leases an injectable clock so the tests run deterministically. | Real waits do not belong in tests that gate publishing. | PM |
+| 2026-09-10 | Item 0008 landed (73 tests ×3): explicit production clock wiring, deterministic lease tests, no real waits. Publish re-dispatched. | — | PM |

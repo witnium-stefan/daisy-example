@@ -313,11 +313,11 @@ for (const path of ['/faults', '/faults/reset', '/jobs']) {
     })).status, 202);
     const pending = httpRequest(f.url + path, { method: 'POST', headers: { authorization: `Bearer ${f.env.EXAMPLE_TOKEN}` } });
     pending.on('error', () => {});
-    t.after(() => pending.destroy());
-    const response = once(pending, 'response');
-    pending.write('{');
-    await delay(50);
     if (path === '/jobs') {
+      t.after(() => pending.destroy());
+      const response = once(pending, 'response');
+      pending.write('{');
+      await delay(50);
       let transactions = 0;
       f.store.transaction = async () => { transactions++; throw new Error('Unexpected transaction'); };
       assert.equal((await f.request('/faults', { ...metadata(), fault: 'database-down' })).status, 202);
@@ -329,14 +329,32 @@ for (const path of ['/faults', '/faults/reset', '/jobs']) {
       assert.deepEqual(JSON.parse(text), { error: 'EXAMPLE_DATABASE_DOWN' });
       assert.equal(transactions, 0);
     } else {
-      await delay(220);
-      assert.equal((await f.request()).body.active, null);
-      assert.equal((await f.request()).body.lastReset.reason, 'expired');
-      assert.equal((await f.request('/faults/reset', metadata())).status, 200);
-      pending.end('}');
-      const [res] = await response;
-      res.resume();
-      assert.equal(res.statusCode, 400);
+      const abort = new AbortController();
+      const closed = new Promise((resolve) => pending.once('close', resolve));
+      const response = once(pending, 'response', { signal: abort.signal });
+      // Observe rejection immediately, including when an assertion fails before the response.
+      response.catch(() => {});
+      let res;
+      try {
+        pending.write('{');
+        await delay(50);
+        await delay(220);
+        assert.equal((await f.request()).body.active, null);
+        assert.equal((await f.request()).body.lastReset.reason, 'expired');
+        assert.equal((await f.request('/faults/reset', metadata())).status, 200);
+        pending.end('}');
+        [res] = await response;
+        for await (const chunk of res) { /* Drain the response before teardown. */ }
+        assert.equal(res.statusCode, 400);
+        assert.equal(res.complete, true);
+      } finally {
+        f.control.close();
+        abort.abort();
+        res?.destroy();
+        pending.destroy();
+        await Promise.allSettled([response, closed]);
+      }
+      assert.equal(pending.destroyed, true);
     }
   });
 }

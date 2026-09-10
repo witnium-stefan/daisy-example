@@ -118,12 +118,43 @@ placeholder. The endpoint holds the same transaction lock as the ordered writer,
 drains all committed rows' file completions, verifies the full row/hash chain and
 file set, and returns a manifest only after commit. It includes checkpoint ID,
 run ID, time, source revision, supplied image identity/scope, common watermark W,
-every ordered row, and every file's name/hash/size. Writers resume when the lock
-is released. New submissions can wait for the barrier; queue state is not the
+every ordered row, every file's name/hash/size, and `held: true|false`.
+The optional `hold` field must be a boolean and defaults to false. Without a
+hold, writers resume when the lock releases. Queue state is not the
 committed-prefix oracle.
 
+For a consistent platform capture, use this exact sequence:
+
+1. **Hold:** call checkpoint with `"hold": true` and retain the manifest outside
+   the protected state. In the same database transaction, the API records
+   `checkpointId` and `held_at` in the singleton `ledger_hold` table.
+2. **Platform fence/capture:** fence both API and worker writers (for example,
+   scale both to zero), then capture the protected database and files.
+3. **Platform unfence:** restore the API and worker's availability.
+4. **Release:** authenticated `POST /internal/checkpoint/release` with
+   `{ "checkpointId": "<holding checkpoint ID>" }` deletes that hold and returns
+   `{ "checkpointId": "<holding checkpoint ID>", "refusedWrites": 3 }` (example count).
+
+Every API enqueue, completion, checkpoint file write, and worker direct ledger
+transaction checks the shared hold under the transaction lock before writing.
+Refused API writes return 423 with
+`{ "error": "EXAMPLE_FROZEN", "checkpointId": "<holding checkpoint ID>" }`.
+The worker treats HTTP 423 and database holds as transient, retaining queued
+work and retrying after its existing one-second loop delay. A second hold returns
+409 with the holding checkpoint ID. Refusals, including second holds, increment
+the durable hold counter; reads, restore verification, and invalid release
+attempts do not. Release with a different ID returns 409 naming the holding ID;
+release without an active hold returns 409 `EXAMPLE_NOT_FROZEN`.
+
+**Restart does not clear a hold.** A platform that never calls release cannot
+rely on process restart: the platform or an operator must call release. Reads
+and `/internal/restore` work while held, including on a restored physical database
+that contains the hold. `ledger_hold` is operational state excluded from ledger
+manifests, like the other operational records. A restore path starting from only
+manifest ledger data has no hold; a physical database capture can retain it.
+
 Retain that response **outside** the protected database and files volume as the
-independent expected manifest. Commit additional jobs after the checkpoint to
+independent expected manifest. After release (if held), commit additional jobs to
 make the selected boundary observable. Using an independently approved protection
 mechanism, restore both database and files to an isolated destination with no
 worker and no public hostname. This slice does not copy a live database or choose

@@ -32,16 +32,29 @@ test('real PostgreSQL: commit acknowledgment, second session, rollback, and appl
     ]);
     assert.deepEqual(second, retry);
     assert.equal(second.sequence, 2);
+    phase = 'durable hold and independent writer refusal';
+    await observer.transaction((tx) => tx.hold('postgres-checkpoint'), { mode: 'hold' });
+    await assert.rejects(writeLedger(writer, { id: 'held-writer', payload: '' }), (error) => error.status === 423 && error.checkpointId === 'postgres-checkpoint');
     phase = 'application restart';
     await writer.close();
     const moduleUrl = new URL('../services/database.mjs', import.meta.url).href;
     const script = `import { database } from ${JSON.stringify(moduleUrl)};
       const db = database(process.env.DATABASE_URL);
-      try { await db.initialize(); process.stdout.write(JSON.stringify(await db.rows())); }
+      try {
+        await db.initialize();
+        let refused = false;
+        try { await db.transaction((tx) => tx.enqueue({ id: 'restarted-writer', payload: '' })); }
+        catch (error) { if (error.status !== 423 || error.checkpointId !== 'postgres-checkpoint') throw error; refused = true; }
+        if (!refused) throw new Error('Restart cleared durable hold');
+        process.stdout.write(JSON.stringify(await db.rows()));
+      }
       catch { process.stderr.write('Restarted PostgreSQL reader failed'); process.exitCode = 1; }
       finally { await db.close(); }`;
     const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], { env: process.env });
     assert.deepEqual(JSON.parse(stdout), [first, second]);
+    phase = 'release persists refusal count and thaws writes';
+    assert.deepEqual(await observer.transaction((tx) => tx.release('postgres-checkpoint'), { mode: 'release' }), { refusedWrites: 2 });
+    assert.equal((await writeLedger(observer, { id: 'after-release', payload: '' })).sequence, 3);
   } catch {
     // pg errors can contain DATABASE_URL credentials; report only the failed phase.
     throw new Error(`Disposable DATABASE_URL real-commit check failed: ${phase}`);

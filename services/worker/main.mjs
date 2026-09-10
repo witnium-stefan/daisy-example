@@ -11,6 +11,16 @@ export function createWorker(env, dependencies, faultControl) {
 }
 
 export async function workOnce(store, config) {
+  try {
+    return await processJob(store, config);
+  } catch (error) {
+    // The shared queue retains the job; the normal loop delay backs off retries.
+    if (error.status === 423) return;
+    throw error;
+  }
+}
+
+async function processJob(store, config) {
   let { job } = await apiRequest(config, '/internal/jobs');
   if (!job) {
     job = { id: `synthetic-${randomUUID()}`, payload: 'Daisy synthetic ledger entry' };

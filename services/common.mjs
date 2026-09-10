@@ -144,6 +144,6 @@ export async function apiRequest(config, path, options = {}) {
     ...options, headers: { 'content-type': 'application/json', ...(config.token ? { authorization: `Bearer ${config.token}` } : {}) },
     signal: AbortSignal.timeout(10000), redirect: 'error',
   });
-  if (!response.ok) throw new Error('API request failed');
+  if (!response.ok) throw Object.assign(new Error('API request failed'), { status: response.status });
   return response.json();
 }

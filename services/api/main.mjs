@@ -14,7 +14,7 @@ export function createApi(env, dependencies, store, volume, faultControl) {
     if (req.url.startsWith('/internal/') && !authorized(req, config.token)) return reply(401, { error: 'Unauthorized worker request' });
     if (['/health/live', '/health/ready', '/version'].includes(req.url)) return management(req, res);
     const route = `${req.method} ${req.url}`;
-    if (!['GET /', 'GET /ledger', 'GET /files', 'POST /jobs', 'GET /internal/jobs', 'POST /internal/jobs', 'POST /internal/complete', 'POST /internal/checkpoint', 'POST /internal/restore'].includes(route)) return reply(404, { error: 'not-found' });
+    if (!['GET /', 'GET /ledger', 'GET /files', 'POST /jobs', 'GET /internal/jobs', 'POST /internal/jobs', 'POST /internal/complete', 'POST /internal/checkpoint', 'POST /internal/checkpoint/release', 'POST /internal/restore'].includes(route)) return reply(404, { error: 'not-found' });
     if (!store || !volume) return reply(503, { error: 'Missing API state dependencies' });
     try {
       control.assertDatabase();
@@ -46,9 +46,17 @@ export function createApi(env, dependencies, store, volume, faultControl) {
         });
         return reply(200, completed);
       }
+      if (route === 'POST /internal/checkpoint/release') {
+        let input;
+        try { input = await body(req, config.token); } catch { return reply(400, { error: 'Invalid checkpoint release' }); }
+        if (typeof input?.checkpointId !== 'string' || !input.checkpointId.trim()) return reply(400, { error: 'Checkpoint release requires checkpointId' });
+        const released = await store.transaction((tx) => tx.release(input.checkpointId), { mode: 'release' });
+        return reply(200, { checkpointId: input.checkpointId, ...released });
+      }
       if (route === 'POST /internal/checkpoint') {
         let input;
         try { input = await body(req, config.token); } catch { return reply(400, { error: 'Invalid checkpoint metadata' }); }
+        if (input && Object.hasOwn(input, 'hold') && typeof input.hold !== 'boolean') return reply(400, { error: 'Checkpoint hold must be a boolean' });
         if (typeof input?.runId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.runId) ||
             !/^sha256:[a-f0-9]{64}$/.test(input.imageDigest ?? '') || typeof input.targetScope !== 'string' || !input.targetScope.trim()) return reply(400, { error: 'Checkpoint requires runId, imageDigest and targetScope' });
         const manifest = await store.transaction(async (tx) => {
@@ -62,10 +70,11 @@ export function createApi(env, dependencies, store, volume, faultControl) {
           }
           const manifest = { format: 1, checkpointId: randomUUID(), runId: input.runId, imageDigest: input.imageDigest,
             targetScope: input.targetScope, sourceRevision: config.revision, time: new Date().toISOString(),
-            watermark: rows.length, rows, files: fileManifest };
+            held: input.hold === true, watermark: rows.length, rows, files: fileManifest };
           await verifyPrefix(manifest, rows, volume);
+          if (manifest.held) await tx.hold(manifest.checkpointId);
           return manifest;
-        });
+        }, { mode: input.hold === true ? 'hold' : 'write' });
         return reply(200, manifest);
       }
       if (route === 'POST /internal/restore') {
@@ -73,11 +82,13 @@ export function createApi(env, dependencies, store, volume, faultControl) {
         try { expected = await body(req, config.token, 80 * 1024 * 1024); } catch { return reply(400, { error: 'Invalid recovery manifest' }); }
         const started = performance.now();
         try {
-          const result = await store.transaction(async (tx) => verifyPrefix(expected, await tx.rows(), volume));
+          const result = await store.transaction(async (tx) => verifyPrefix(expected, await tx.rows(), volume), { mode: 'read' });
           return reply(200, { ...result, durationMs: Math.round(performance.now() - started) });
         } catch { return reply(409, { error: 'Complete-prefix restore verification failed' }); }
       }
     } catch (error) {
+      if (error.message === 'EXAMPLE_FROZEN') return reply(error.status, { error: 'EXAMPLE_FROZEN', checkpointId: error.checkpointId });
+      if (error.message === 'EXAMPLE_NOT_FROZEN') return reply(409, { error: 'EXAMPLE_NOT_FROZEN' });
       if (error.message === 'EXAMPLE_DATABASE_DOWN') return reply(503, { error: 'EXAMPLE_DATABASE_DOWN' });
       if (error.message === 'Job ID payload conflict') return reply(409, { error: 'Job ID payload conflict' });
       // SQL/network/filesystem errors may contain credentials or user payloads.

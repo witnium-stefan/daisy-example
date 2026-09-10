@@ -166,3 +166,105 @@ test('restore accepts exactly the complete prefix and rejects missing middle row
   await assert.rejects(verifyPrefix(manifest, manifest.rows, copy), /ENOENT/);
   await assert.rejects(verifyPrefix({ ...manifest, watermark: 4 }, manifest.rows, copy), /Invalid recovery/);
 });
+
+test('database hold fences all writers across API instances, counts refusals, and releases explicitly', async (t) => {
+  const { store, request, env, volume } = await setup(t);
+  await request('/jobs', { id: 'queued', payload: 'later' });
+  const row = await writeLedger(store, { id: 'prefix', payload: 'one' });
+  const { status, body: manifest } = await request('/internal/checkpoint', { ...metadata, hold: true });
+  assert.equal(status, 200);
+  assert.equal(manifest.held, true);
+  assert.equal(manifest.watermark, 1);
+  assert.equal(Object.hasOwn(manifest, 'ledger_hold'), false);
+  const frozen = { error: 'EXAMPLE_FROZEN', checkpointId: manifest.checkpointId };
+  for (const [path, input] of [
+    ['/jobs', { id: 'blocked', payload: '' }],
+    ['/internal/jobs', { id: 'blocked', payload: '' }],
+    ['/internal/complete', { sequence: row.sequence }],
+    ['/internal/checkpoint', metadata],
+  ]) assert.deepEqual(await request(path, input), { status: 423, body: frozen });
+  await assert.rejects(writeLedger(store, { id: 'direct', payload: '' }), (error) => error.status === 423 && error.checkpointId === manifest.checkpointId);
+  assert.deepEqual(await request('/internal/checkpoint', { ...metadata, hold: true }), { status: 409, body: frozen });
+  assert.deepEqual(await request('/internal/checkpoint/release', { checkpointId: 'wrong' }), { status: 409, body: frozen });
+  assert.equal((await request('/internal/checkpoint/release', { checkpointId: manifest.checkpointId }, 'wrong')).status, 401);
+  for (const path of ['/ledger', '/files', '/internal/jobs']) assert.equal((await request(path)).status, 200);
+  assert.equal((await request('/internal/restore', manifest)).status, 200);
+  assert.deepEqual(await store.rows(), manifest.rows);
+  assert.deepEqual(await volume.list(), manifest.files);
+  // Recreating the API cannot thaw shared database state.
+  const restarted = await serve(t, createApi(env, { postgres: async () => {}, files: volume.ready }, store, volume));
+  const response = await fetch(restarted + '/jobs', { method: 'POST', body: JSON.stringify({ id: 'restart', payload: '' }) });
+  assert.equal(response.status, 423);
+  assert.deepEqual(await response.json(), frozen);
+  assert.deepEqual(await request('/internal/checkpoint/release', { checkpointId: manifest.checkpointId }), {
+    status: 200, body: { checkpointId: manifest.checkpointId, refusedWrites: 7 },
+  });
+  assert.equal((await workOnce(store, configuration('worker', env))).row.id, 'queued');
+  assert.equal((await request('/jobs', { id: 'thawed', payload: '' })).status, 202);
+  assert.equal((await request('/internal/checkpoint', metadata)).body.held, false);
+  assert.equal((await request('/internal/checkpoint/release', { checkpointId: manifest.checkpointId })).status, 409);
+});
+
+test('hold commits atomically with checkpoint and fences a waiting direct writer', async (t) => {
+  const { store, request, volume } = await setup(t);
+  await writeLedger(store, { id: 'prefix', payload: '' });
+  store.failCommit = true;
+  assert.equal((await request('/internal/checkpoint', { ...metadata, hold: true })).status, 503);
+  store.failCommit = false;
+  await writeLedger(store, { id: 'after-failed-hold', payload: '' });
+  let entered, release;
+  const entering = new Promise((resolve) => { entered = resolve; });
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const write = volume.write;
+  volume.write = async (row) => { entered(); await waiting; return write(row); };
+  const checkpoint = request('/internal/checkpoint', { ...metadata, hold: true });
+  await entering;
+  const refused = assert.rejects(writeLedger(store, { id: 'waiting', payload: '' }), (error) => error.status === 423);
+  release();
+  const { body: manifest } = await checkpoint;
+  await refused;
+  assert.equal(manifest.watermark, 2);
+  assert.equal((await request('/internal/restore', manifest)).status, 200);
+  assert.equal((await request('/internal/checkpoint/release', { checkpointId: manifest.checkpointId })).body.refusedWrites, 1);
+});
+
+test('worker retries database and API holds through its normal loop without losing queued work', async (t) => {
+  const { store, request, env } = await setup(t);
+  const config = configuration('worker', env);
+  // An empty FIFO attempts synthetic enqueue and receives HTTP 423.
+  let manifest = (await request('/internal/checkpoint', { ...metadata, hold: true })).body;
+  assert.equal(await workOnce(store, config), undefined);
+  assert.equal(await store.nextJob(), null);
+  assert.equal((await request('/internal/checkpoint/release', { checkpointId: manifest.checkpointId })).body.refusedWrites, 1);
+  await request('/jobs', { id: 'retained', payload: '' });
+  manifest = (await request('/internal/checkpoint', { ...metadata, hold: true })).body;
+  for (let i = 0; i < 2; i++) assert.equal(await workOnce(store, config), undefined);
+  assert.equal((await store.nextJob()).id, 'retained');
+  assert.deepEqual(await store.rows(), []);
+  assert.equal((await request('/internal/checkpoint/release', { checkpointId: manifest.checkpointId })).body.refusedWrites, 2);
+  // Hold after the direct SQL commit, before the HTTP completion call.
+  const transaction = store.transaction.bind(store);
+  let intercept = true;
+  store.transaction = async (...args) => {
+    const result = await transaction(...args);
+    if (intercept && result?.id === 'retained') {
+      intercept = false;
+      manifest = (await request('/internal/checkpoint', { ...metadata, hold: true })).body;
+    }
+    return result;
+  };
+  assert.equal(await workOnce(store, config), undefined);
+  assert.equal((await store.rows()).length, 1);
+  assert.equal((await request('/internal/checkpoint/release', { checkpointId: manifest.checkpointId })).body.refusedWrites, 1);
+  // Checkpoint already completed the retained row; retrying its completion is safe.
+  assert.equal((await request('/internal/complete', { sequence: 1 })).status, 200);
+  assert.equal(await store.nextJob(), null);
+  assert.equal((await workOnce(store, config)).row.sequence, 2);
+});
+
+test('checkpoint hold and release reject malformed inputs explicitly', async (t) => {
+  const { request } = await setup(t);
+  for (const hold of [null, 'true', 1, {}]) assert.equal((await request('/internal/checkpoint', { ...metadata, hold })).status, 400);
+  for (const input of [{}, { checkpointId: '' }, { checkpointId: 1 }, null]) assert.equal((await request('/internal/checkpoint/release', input)).status, 400);
+  assert.equal((await request('/internal/checkpoint', { ...metadata, hold: false })).body.held, false);
+});

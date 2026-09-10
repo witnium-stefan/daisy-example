@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm, readdir, mkdir, copyFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compose, generate, services, validateCompose } from '../scripts/compose.mjs';
@@ -26,6 +26,7 @@ async function composeCommitStep() {
   assert.equal(workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1], '  workflow_dispatch:\n');
   assert.match(workflow, /permissions:\n      contents: write/);
   assert.match(steps[commit], /GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.match(steps[commit], /^          git -C "\$checkout" add -- docker-compose\.yaml$/m);
   return steps[commit].split('        run: |\n')[1].trimEnd().split('\n').map(line => line.slice(10)).join('\n');
 }
 
@@ -48,9 +49,13 @@ test('workflow checks in exact generator output on current main and skips unchan
   const git = (...args) => execFileSync('git', args, { cwd: source, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init', '--bare', '--initial-branch=main', remote);
   git('init', '--initial-branch=main');
+  await copyFile(new URL('../.gitignore', import.meta.url), join(source, '.gitignore'));
+  const ignored = spawnSync('git', ['check-ignore', '--no-index', 'docker-compose.yaml'], { cwd: source, env, encoding: 'utf8' });
+  assert.equal(ignored.status, 1, `Root Compose must not be ignored: ${ignored.error ?? ignored.stderr}${ignored.stdout}`);
+  assert.equal(git('check-ignore', '--no-index', 'release/docker-compose.yaml'), 'release/docker-compose.yaml');
   git('remote', 'add', 'origin', remote);
   await writeFile(join(source, 'README.md'), 'Reviewed source\n');
-  git('add', 'README.md');
+  git('add', 'README.md', '.gitignore');
   git('commit', '-m', 'Reviewed source');
   const revision = git('rev-parse', 'HEAD');
   await writeFile(join(source, 'README.md'), 'Newer main content\n');
